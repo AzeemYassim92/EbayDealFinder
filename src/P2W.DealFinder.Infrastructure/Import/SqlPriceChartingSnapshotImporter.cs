@@ -2,11 +2,14 @@
 using System.Net;
 using System.Text;
 using Microsoft.Data.SqlClient;
+using P2W.DealFinder.Application.Grading;
 
 namespace P2W.DealFinder.Infrastructure.Import;
 
 public sealed class SqlPriceChartingSnapshotImporter
 {
+    private const string ParserVersion = "pc-bulk-v2";
+
     public async Task<PriceChartingSnapshotImportResult> ImportAsync(PriceChartingSnapshotImportRequest request, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(request.Token)) throw new ArgumentException("PriceCharting token is required.");
@@ -15,13 +18,18 @@ public sealed class SqlPriceChartingSnapshotImporter
 
         var capturedAtUtc = DateTimeOffset.UtcNow;
         var runId = Guid.NewGuid();
-        var rows = await DownloadRowsAsync(request.Token, request.Category, ct);
+        var grades = GradeDefinitions.ResolveMany(request.GradeCodes, defaultToPrimary: true);
+        var document = await DownloadRowsAsync(request.Token, request.Category, ct);
+        var rows = document.Rows;
+        var csvHeaders = document.Headers.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray();
+        var gradeCoverage = BuildCoverage(rows, csvHeaders, grades).ToArray();
+        var unrecognizedHeaders = csvHeaders.Except(RecognizedHeaders, StringComparer.OrdinalIgnoreCase).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray();
         var skipCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var accepted = new List<PriceChartingCsvRow>();
 
         foreach (var row in rows)
         {
-            var skipReason = SkipReason(row, request);
+            var skipReason = SkipReason(row, request, grades);
             if (skipReason is not null)
             {
                 skipCounts[skipReason] = skipCounts.GetValueOrDefault(skipReason) + 1;
@@ -49,10 +57,14 @@ public sealed class SqlPriceChartingSnapshotImporter
                 skippedRows,
                 0,
                 0,
+                0,
                 true,
                 targetDatabase,
                 capturedAtUtc,
                 skipCounts.Select(pair => new PriceChartingSkippedReason(pair.Key, pair.Value)).OrderByDescending(x => x.Count).ToArray(),
+                gradeCoverage,
+                csvHeaders,
+                unrecognizedHeaders,
                 previewRows);
         }
 
@@ -64,16 +76,18 @@ public sealed class SqlPriceChartingSnapshotImporter
         await using var connection = new SqlConnection(request.TargetConnectionString);
         await connection.OpenAsync(ct);
         await EnsureSchemaAsync(connection, ct);
-        await CreateRunAsync(connection, runId, request, rows.Count, accepted.Count, capturedAtUtc, ct);
+        await CreateRunAsync(connection, runId, request, rows.Count, accepted.Count, capturedAtUtc, grades, ct);
 
         var productsWritten = 0;
         var snapshotsWritten = 0;
+        var gradeSnapshotsWritten = 0;
         foreach (var row in accepted)
         {
             await UpsertProductAsync(connection, row, request.Category, capturedAtUtc, ct);
             productsWritten++;
             await InsertSnapshotAsync(connection, runId, row, request.Category, capturedAtUtc, ct);
             snapshotsWritten++;
+            gradeSnapshotsWritten += await InsertGradeSnapshotsAsync(connection, runId, row, grades, capturedAtUtc, ct);
         }
 
         await FinishRunAsync(connection, runId, productsWritten, snapshotsWritten, ct);
@@ -86,14 +100,18 @@ public sealed class SqlPriceChartingSnapshotImporter
             skippedRows,
             productsWritten,
             snapshotsWritten,
+            gradeSnapshotsWritten,
             false,
             targetDatabase,
             capturedAtUtc,
             skipCounts.Select(pair => new PriceChartingSkippedReason(pair.Key, pair.Value)).OrderByDescending(x => x.Count).ToArray(),
+            gradeCoverage,
+            csvHeaders,
+            unrecognizedHeaders,
             previewRows);
     }
 
-    private static async Task<IReadOnlyList<PriceChartingCsvRow>> DownloadRowsAsync(string token, string category, CancellationToken ct)
+    private static async Task<PriceChartingCsvDocument> DownloadRowsAsync(string token, string category, CancellationToken ct)
     {
         using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(3) };
         var url = $"https://www.pricecharting.com/price-guide/download-custom?t={WebUtility.UrlEncode(token)}&category={WebUtility.UrlEncode(category)}";
@@ -101,12 +119,33 @@ public sealed class SqlPriceChartingSnapshotImporter
         return Parse(csv);
     }
 
-    private static string? SkipReason(PriceChartingCsvRow row, PriceChartingSnapshotImportRequest request)
+    private static string? SkipReason(PriceChartingCsvRow row, PriceChartingSnapshotImportRequest request, IReadOnlyList<GradeDefinition> grades)
     {
         if (string.IsNullOrWhiteSpace(row.Text("id"))) return "missing PriceCharting id";
         if (request.EnglishOnly && !LooksEnglishPokemonCard(row)) return "non-English or non-Pokemon card signal";
-        if (request.RequirePsa10 && row.Price("manual-only-price") is null) return "missing PSA 10 price";
+        if (!request.IncludeProductsWithoutRequestedGrade && request.RequireAnyRequestedGrade && !HasAnyRequestedGrade(row, grades)) return "missing requested grade price";
         return null;
+    }
+
+    private static bool HasAnyRequestedGrade(PriceChartingCsvRow row, IReadOnlyList<GradeDefinition> grades)
+        => grades.Any(grade => grade.PriceChartingBulkField is not null && row.Price(grade.PriceChartingBulkField) is not null);
+
+    private static PriceChartingGradeCoverage[] BuildCoverage(IReadOnlyList<PriceChartingCsvRow> rows, IReadOnlyList<string> headers, IReadOnlyList<GradeDefinition> requestedGrades)
+    {
+        var requested = new HashSet<string>(requestedGrades.Select(x => x.Code), StringComparer.OrdinalIgnoreCase);
+        return GradeDefinitions.All
+            .Select(grade =>
+            {
+                var sourceField = grade.PriceChartingBulkField;
+                var fieldPresent = sourceField is not null && headers.Contains(sourceField, StringComparer.OrdinalIgnoreCase);
+                var rowsWithValue = sourceField is null ? 0 : rows.Count(row => row.Price(sourceField) is not null);
+                var status = grade.IsBulkPriceSupported
+                    ? fieldPresent ? rowsWithValue > 0 ? "Available" : "Missing" : "Missing"
+                    : "Unsupported";
+                return new PriceChartingGradeCoverage(grade.Code, grade.DisplayName, sourceField, grade.IsBulkPriceSupported, requested.Contains(grade.Code), fieldPresent, rowsWithValue, status);
+            })
+            .OrderBy(x => GradeDefinitions.GetRequired(x.GradeCode).DisplayOrder)
+            .ToArray();
     }
 
     private static bool LooksEnglishPokemonCard(PriceChartingCsvRow row)
@@ -225,12 +264,56 @@ BEGIN
     CREATE INDEX IX_PriceChartingPriceSnapshots_ProductCaptured ON dbo.PriceChartingPriceSnapshots(ProductId, CapturedAtUtc DESC);
     CREATE INDEX IX_PriceChartingPriceSnapshots_Psa10Volume ON dbo.PriceChartingPriceSnapshots(Psa10Price, SalesVolume);
 END;
+
+IF OBJECT_ID('dbo.PriceChartingGradePriceSnapshots', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.PriceChartingGradePriceSnapshots
+    (
+        Id uniqueidentifier NOT NULL CONSTRAINT PK_PriceChartingGradePriceSnapshots PRIMARY KEY,
+        RunId uniqueidentifier NULL,
+        ProductId nvarchar(80) NOT NULL,
+        GradeCode nvarchar(50) NOT NULL,
+        GradeLabel nvarchar(100) NOT NULL,
+        MarketPrice decimal(18,2) NULL,
+        ProviderSalesCount int NULL,
+        ProviderVolumeText nvarchar(120) NULL,
+        SourceKind nvarchar(40) NOT NULL,
+        SourceField nvarchar(120) NULL,
+        SourceUrl nvarchar(600) NULL,
+        AvailabilityStatus nvarchar(40) NOT NULL,
+        IsEstimated bit NULL,
+        CapturedAtUtc datetime2 NOT NULL,
+        ParserVersion nvarchar(40) NULL,
+        RawSourceJson nvarchar(max) NULL,
+        ErrorMessage nvarchar(max) NULL
+    );
+END;
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_PriceChartingGradePriceSnapshots_ProductGradeCaptured' AND object_id = OBJECT_ID('dbo.PriceChartingGradePriceSnapshots'))
+    CREATE INDEX IX_PriceChartingGradePriceSnapshots_ProductGradeCaptured ON dbo.PriceChartingGradePriceSnapshots(ProductId, GradeCode, CapturedAtUtc DESC);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_PriceChartingGradePriceSnapshots_GradePriceCaptured' AND object_id = OBJECT_ID('dbo.PriceChartingGradePriceSnapshots'))
+    CREATE INDEX IX_PriceChartingGradePriceSnapshots_GradePriceCaptured ON dbo.PriceChartingGradePriceSnapshots(GradeCode, MarketPrice, CapturedAtUtc DESC);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_PriceChartingGradePriceSnapshots_StatusGrade' AND object_id = OBJECT_ID('dbo.PriceChartingGradePriceSnapshots'))
+    CREATE INDEX IX_PriceChartingGradePriceSnapshots_StatusGrade ON dbo.PriceChartingGradePriceSnapshots(AvailabilityStatus, GradeCode);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_PriceChartingGradePriceSnapshots_RunId' AND object_id = OBJECT_ID('dbo.PriceChartingGradePriceSnapshots'))
+    CREATE INDEX IX_PriceChartingGradePriceSnapshots_RunId ON dbo.PriceChartingGradePriceSnapshots(RunId);
+
+EXEC('CREATE OR ALTER VIEW dbo.vw_PriceChartingLatestGradePrices AS
+WITH ranked AS
+(
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY ProductId, GradeCode ORDER BY CapturedAtUtc DESC, Id DESC) AS rn
+    FROM dbo.PriceChartingGradePriceSnapshots
+)
+SELECT Id, RunId, ProductId, GradeCode, GradeLabel, MarketPrice, ProviderSalesCount, ProviderVolumeText, SourceKind, SourceField, SourceUrl,
+       AvailabilityStatus, IsEstimated, CapturedAtUtc, ParserVersion, RawSourceJson, ErrorMessage
+FROM ranked
+WHERE rn = 1;');
 """;
-        await using var command = new SqlCommand(sql, connection);
+        await using var command = new SqlCommand(sql, connection) { CommandTimeout = 120 };
         await command.ExecuteNonQueryAsync(ct);
     }
 
-    private static async Task CreateRunAsync(SqlConnection connection, Guid runId, PriceChartingSnapshotImportRequest request, int totalRows, int acceptedRows, DateTimeOffset startedUtc, CancellationToken ct)
+    private static async Task CreateRunAsync(SqlConnection connection, Guid runId, PriceChartingSnapshotImportRequest request, int totalRows, int acceptedRows, DateTimeOffset startedUtc, IReadOnlyList<GradeDefinition> grades, CancellationToken ct)
     {
         const string sql = """
 INSERT dbo.PriceChartingImportRuns (Id, Category, Status, StartedUtc, TotalRows, AcceptedRows, ProductsWritten, SnapshotsWritten, Notes)
@@ -242,7 +325,7 @@ VALUES (@Id, @Category, 'Started', @StartedUtc, @TotalRows, @AcceptedRows, 0, 0,
         command.Parameters.AddWithValue("@StartedUtc", startedUtc.UtcDateTime);
         command.Parameters.AddWithValue("@TotalRows", totalRows);
         command.Parameters.AddWithValue("@AcceptedRows", acceptedRows);
-        command.Parameters.AddWithValue("@Notes", $"englishOnly={request.EnglishOnly}; requirePsa10={request.RequirePsa10}; limit={request.Limit?.ToString(CultureInfo.InvariantCulture) ?? "all"}");
+        command.Parameters.AddWithValue("@Notes", $"englishOnly={request.EnglishOnly}; grades={string.Join(',', grades.Select(x => x.Code))}; requireAnyRequestedGrade={request.RequireAnyRequestedGrade}; includeProductsWithoutRequestedGrade={request.IncludeProductsWithoutRequestedGrade}; limit={request.Limit?.ToString(CultureInfo.InvariantCulture) ?? "all"}");
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -345,14 +428,71 @@ VALUES
         await command.ExecuteNonQueryAsync(ct);
     }
 
+    private static async Task<int> InsertGradeSnapshotsAsync(SqlConnection connection, Guid runId, PriceChartingCsvRow row, IReadOnlyList<GradeDefinition> requestedGrades, DateTimeOffset capturedAtUtc, CancellationToken ct)
+    {
+        const string sql = """
+INSERT dbo.PriceChartingGradePriceSnapshots
+(
+    Id, RunId, ProductId, GradeCode, GradeLabel, MarketPrice, ProviderSalesCount, ProviderVolumeText, SourceKind, SourceField, SourceUrl,
+    AvailabilityStatus, IsEstimated, CapturedAtUtc, ParserVersion, RawSourceJson, ErrorMessage
+)
+VALUES
+(
+    NEWID(), @RunId, @ProductId, @GradeCode, @GradeLabel, @MarketPrice, @ProviderSalesCount, @ProviderVolumeText, @SourceKind, @SourceField, @SourceUrl,
+    @AvailabilityStatus, @IsEstimated, @CapturedAtUtc, @ParserVersion, @RawSourceJson, @ErrorMessage
+);
+""";
+        var requested = new HashSet<string>(requestedGrades.Select(x => x.Code), StringComparer.OrdinalIgnoreCase);
+        var toWrite = GradeDefinitions.All
+            .Where(grade => grade.IsBulkPriceSupported || requested.Contains(grade.Code))
+            .ToArray();
+        var count = 0;
+        foreach (var grade in toWrite)
+        {
+            var marketPrice = grade.PriceChartingBulkField is null ? null : row.Price(grade.PriceChartingBulkField);
+            var availability = grade.IsBulkPriceSupported ? marketPrice is null ? "Missing" : "Available" : "Unsupported";
+            await using var command = new SqlCommand(sql, connection);
+            command.Parameters.AddWithValue("@RunId", runId);
+            command.Parameters.AddWithValue("@ProductId", row.Text("id") ?? "");
+            command.Parameters.AddWithValue("@GradeCode", grade.Code);
+            command.Parameters.AddWithValue("@GradeLabel", grade.DisplayName);
+            Add(command, "@MarketPrice", marketPrice);
+            Add(command, "@ProviderSalesCount", null);
+            Add(command, "@ProviderVolumeText", grade.Code == GradeDefinitions.Ungraded ? row.Text("sales-volume") : null);
+            command.Parameters.AddWithValue("@SourceKind", grade.PriceSourceKind.ToString());
+            Add(command, "@SourceField", grade.PriceChartingBulkField);
+            Add(command, "@SourceUrl", BuildPriceChartingProductUrl(row.Text("console-name") ?? "", row.Text("product-name") ?? ""));
+            command.Parameters.AddWithValue("@AvailabilityStatus", availability);
+            Add(command, "@IsEstimated", false);
+            command.Parameters.AddWithValue("@CapturedAtUtc", capturedAtUtc.UtcDateTime);
+            command.Parameters.AddWithValue("@ParserVersion", ParserVersion);
+            command.Parameters.AddWithValue("@RawSourceJson", row.ToJson());
+            Add(command, "@ErrorMessage", availability == "Unsupported" ? "Grade is not exposed by the verified PriceCharting bulk CSV fields." : null);
+            await command.ExecuteNonQueryAsync(ct);
+            count++;
+        }
+
+        return count;
+    }
+
+    private static string BuildPriceChartingProductUrl(string consoleName, string productName)
+        => $"https://www.pricecharting.com/game/{Slug(consoleName)}/{Slug(productName)}";
+
+    private static string Slug(string value)
+    {
+        var decoded = WebUtility.HtmlDecode(value).ToLowerInvariant();
+        decoded = decoded.Replace("#", " ", StringComparison.Ordinal);
+        return System.Text.RegularExpressions.Regex.Replace(decoded, @"[^a-z0-9]+", "-").Trim('-');
+    }
+
     private static decimal? EstimateVolume(int? yearlyVolume, int days)
         => yearlyVolume is null ? null : Math.Round(yearlyVolume.Value * days / 365m, 2);
 
-    private static IReadOnlyList<PriceChartingCsvRow> Parse(string csv)
+    private static PriceChartingCsvDocument Parse(string csv)
     {
         using var reader = new StringReader(csv);
         var headerLine = reader.ReadLine();
-        if (string.IsNullOrWhiteSpace(headerLine)) return Array.Empty<PriceChartingCsvRow>();
+        if (string.IsNullOrWhiteSpace(headerLine)) return new PriceChartingCsvDocument(Array.Empty<string>(), Array.Empty<PriceChartingCsvRow>());
 
         var headers = ParseLine(headerLine).Select(header => header.Trim()).ToArray();
         var rows = new List<PriceChartingCsvRow>();
@@ -368,7 +508,7 @@ VALUES
             rows.Add(new PriceChartingCsvRow(fields));
         }
 
-        return rows;
+        return new PriceChartingCsvDocument(headers, rows);
     }
 
     private static List<string> ParseLine(string line)
@@ -411,6 +551,15 @@ VALUES
     private static void Add(SqlCommand command, string name, object? value)
         => command.Parameters.AddWithValue(name, value ?? DBNull.Value);
 
+    private static readonly string[] RecognizedHeaders =
+    {
+        "id", "product-name", "console-name", "genre", "release-date", "tcg-id", "upc", "asin", "loose-price", "graded-price",
+        "manual-only-price", "bgs-10-price", "condition-17-price", "condition-18-price", "new-price", "cib-price", "box-only-price",
+        "retail-loose-buy", "retail-loose-sell", "retail-new-buy", "retail-new-sell", "retail-cib-buy", "retail-cib-sell", "sales-volume"
+    };
+
+    private sealed record PriceChartingCsvDocument(string[] Headers, IReadOnlyList<PriceChartingCsvRow> Rows);
+
     private sealed record PriceChartingCsvRow(IReadOnlyDictionary<string, string?> Fields)
     {
         public string? Text(string key)
@@ -452,5 +601,3 @@ VALUES
             => value.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal);
     }
 }
-
-

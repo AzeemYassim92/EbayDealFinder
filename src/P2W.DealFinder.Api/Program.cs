@@ -361,7 +361,10 @@ app.MapGet("/api/scan/ebay-lowest", async (HttpContext context) =>
         FixedFee: QueryDecimal(query, "fixedFee", 0.30m),
         OutboundShippingCost: QueryDecimal(query, "outboundShipping", 5m),
         PackingCost: QueryDecimal(query, "packing", 1m),
-        BufferCost: QueryDecimal(query, "buffer", 2m));
+        BufferCost: QueryDecimal(query, "buffer", 2m),
+        GradeCode: QueryText(query, "grade", "psa10"),
+        EbayCategoryId: QueryText(query, "categoryId", "183454"),
+        EbayCategoryName: QueryText(query, "categoryName", "CCG Individual Cards"));
 
     if (string.IsNullOrWhiteSpace(zyteToken))
     {
@@ -383,6 +386,111 @@ app.MapGet("/api/scan/ebay-lowest", async (HttpContext context) =>
     {
         return Results.Ok(BroadEbayPsa10ScanPayload.Blocked(ex.Message, request));
     }
+});
+
+app.MapPost("/api/scan/graded", async (HttpContext context) =>
+{
+    var body = await context.Request.ReadFromJsonAsync<GradedScanApiRequest>(cancellationToken: context.RequestAborted);
+    var applied = GradedScanApiRequestNormalizer.Normalize(body);
+    var zyteToken = ReadZyteToken(builder.Configuration);
+    if (string.IsNullOrWhiteSpace(zyteToken))
+    {
+        return Results.Ok(GradedScanApiPayload.Blocked("Zyte key is not configured.", applied));
+    }
+
+    var connectionString = ReadDealFinderConnectionString(builder.Configuration);
+    if (string.IsNullOrWhiteSpace(connectionString))
+    {
+        return Results.Ok(GradedScanApiPayload.Blocked("DealFinder database connection string is not configured.", applied));
+    }
+
+    var runs = new List<GradedScanRunSummary>();
+    var results = new List<BroadEbayDealCandidate>();
+    foreach (var gradeCode in applied.Grades)
+    {
+        var request = new BroadEbayPsa10ScanRequest(
+            Query: applied.Query ?? string.Empty,
+            Pages: applied.PagesPerGrade,
+            Take: applied.Take,
+            EbayCondition: applied.EbayCondition,
+            EbayConditionId: applied.EbayConditionId,
+            MinMarketValue: applied.MinMarketValue,
+            MaxMarketValue: applied.MaxMarketValue,
+            MinListingPrice: applied.MinEffectiveBuyPrice,
+            MaxListingPrice: applied.MaxEffectiveBuyPrice,
+            MinProfit: applied.MinProfit,
+            MinMarginPercent: applied.MinMarginPercent,
+            MinRoiPercent: applied.MinRoiPercent,
+            MinMatchScore: applied.MinMatchScore,
+            FeePercent: applied.FeePercentDecimal,
+            FixedFee: applied.FixedFee,
+            OutboundShippingCost: applied.OutboundShippingCost,
+            PackingCost: applied.PackingCost,
+            BufferCost: applied.BufferCost,
+            GradeCode: gradeCode,
+            EbayCategoryId: applied.EbayCategoryId,
+            EbayCategoryName: applied.EbayCategoryName);
+
+        try
+        {
+            var run = await BroadEbayPsa10ScanProvider.ScanAsync(zyteToken, connectionString, request, context.RequestAborted);
+            runs.Add(new GradedScanRunSummary(
+                GradeCode: run.GradeCode,
+                GradeLabel: run.GradeLabel,
+                Status: run.Status,
+                ErrorMessage: run.ErrorMessage,
+                CatalogRowsAvailable: run.CatalogRowsAvailable,
+                ParsedListingCount: run.ParsedListingCount,
+                MatchedListingCount: run.MatchedListingCount,
+                DealCount: run.DealCount,
+                EstimatedZyteRequests: run.EstimatedZyteRequests,
+                EstimatedZyteCost: run.EstimatedZyteCost,
+                SearchUrls: run.SearchUrls,
+                Stats: run.Stats));
+            results.AddRange(run.Results);
+        }
+        catch (Exception ex)
+        {
+            runs.Add(new GradedScanRunSummary(
+                GradeCode: gradeCode,
+                GradeLabel: gradeCode,
+                Status: "provider-error",
+                ErrorMessage: ex.Message,
+                CatalogRowsAvailable: 0,
+                ParsedListingCount: 0,
+                MatchedListingCount: 0,
+                DealCount: 0,
+                EstimatedZyteRequests: 0,
+                EstimatedZyteCost: 0,
+                SearchUrls: Array.Empty<string>(),
+                Stats: BroadEbayStats.Empty));
+        }
+    }
+
+    var filtered = applied.ShowOnlyPassingDeals ? results.Where(row => row.PassesHardFilters) : results;
+    var ranked = filtered
+        .OrderByDescending(row => row.PassesHardFilters)
+        .ThenByDescending(row => row.NetProfit)
+        .ThenByDescending(row => row.ROI)
+        .ThenBy(row => row.Listing.EffectivePrice)
+        .Take(applied.Take)
+        .Select((row, index) => row with { Rank = index + 1 })
+        .ToArray();
+
+    return Results.Ok(new GradedScanApiPayload(
+        Source: "zyte-ebay-graded",
+        Status: runs.Any(run => run.Status == "live") ? "live" : "blocked",
+        ErrorMessage: runs.FirstOrDefault(run => run.ErrorMessage is not null)?.ErrorMessage,
+        AppliedRequest: applied,
+        EstimatedZyteRequests: runs.Sum(run => run.EstimatedZyteRequests),
+        EstimatedZyteCost: runs.Sum(run => run.EstimatedZyteCost),
+        CatalogRowsAvailable: runs.Sum(run => run.CatalogRowsAvailable),
+        ParsedListingCount: runs.Sum(run => run.ParsedListingCount),
+        MatchedListingCount: runs.Sum(run => run.MatchedListingCount),
+        DealCount: ranked.Count(row => row.PassesHardFilters),
+        CapturedAtUtc: DateTimeOffset.UtcNow,
+        GradeRuns: runs,
+        Results: ranked));
 });
 app.MapFallbackToFile("productdetails.html");
 

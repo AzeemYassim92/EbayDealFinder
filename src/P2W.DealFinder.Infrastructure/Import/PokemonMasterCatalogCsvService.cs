@@ -1,8 +1,9 @@
-﻿using System.Globalization;
+using System.Globalization;
 using System.Net;
 using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.Data.SqlClient;
+using P2W.DealFinder.Application.Grading;
 
 namespace P2W.DealFinder.Infrastructure.Import;
 
@@ -52,13 +53,18 @@ public sealed class PokemonMasterCatalogCsvService
         if (string.IsNullOrWhiteSpace(request.OutputPath)) throw new ArgumentException("Output path is required.");
 
         var capturedAtUtc = DateTimeOffset.UtcNow;
-        var providerRows = await DownloadRowsAsync(request.Token, request.Category, ct);
+        var grades = GradeDefinitions.ResolveMany(request.GradeCodes, defaultToPrimary: true);
+        var document = await DownloadRowsAsync(request.Token, request.Category, ct);
+        var providerRows = document.Rows;
+        var csvHeaders = document.Headers.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray();
+        var gradeCoverage = BuildCoverage(providerRows, csvHeaders, grades).ToArray();
+        var unrecognizedHeaders = csvHeaders.Except(RecognizedHeaders, StringComparer.OrdinalIgnoreCase).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray();
         var skipCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var catalogRows = new List<IReadOnlyDictionary<string, string?>>();
 
         foreach (var providerRow in providerRows)
         {
-            var skipReason = SkipReason(providerRow, request);
+            var skipReason = SkipReason(providerRow, request, grades);
             if (skipReason is not null)
             {
                 skipCounts[skipReason] = skipCounts.GetValueOrDefault(skipReason) + 1;
@@ -92,6 +98,9 @@ public sealed class PokemonMasterCatalogCsvService
             skipCounts.Values.Sum(),
             orderedRows.Count(row => IsTrue(row.GetValueOrDefault("IsLikelyPokemonTcg"))),
             orderedRows.Count(row => !string.IsNullOrWhiteSpace(row.GetValueOrDefault("Psa10Price"))),
+            gradeCoverage,
+            csvHeaders,
+            unrecognizedHeaders,
             capturedAtUtc,
             skipCounts.Select(pair => new PokemonMasterCatalogSkippedReason(pair.Key, pair.Value)).OrderByDescending(x => x.Count).ToArray(),
             orderedRows.Take(12).Select(ToPreview).ToArray());
@@ -135,7 +144,7 @@ public sealed class PokemonMasterCatalogCsvService
         return new PokemonMasterCatalogImportResult(runId, csvPath, targetDatabase, rows.Count, imported, false, importedAtUtc, previewRows);
     }
 
-    private static async Task<IReadOnlyList<CsvRow>> DownloadRowsAsync(string token, string category, CancellationToken ct)
+    private static async Task<CsvDocument> DownloadRowsAsync(string token, string category, CancellationToken ct)
     {
         using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(3) };
         var url = $"https://www.pricecharting.com/price-guide/download-custom?t={WebUtility.UrlEncode(token)}&category={WebUtility.UrlEncode(category)}";
@@ -143,12 +152,32 @@ public sealed class PokemonMasterCatalogCsvService
         return Parse(csv);
     }
 
-    private static string? SkipReason(CsvRow row, PokemonMasterCatalogBuildRequest request)
+    private static string? SkipReason(CsvRow row, PokemonMasterCatalogBuildRequest request, IReadOnlyList<GradeDefinition> grades)
     {
         if (string.IsNullOrWhiteSpace(row.Text("id"))) return "missing PriceCharting id";
         if (request.EnglishOnly && !LooksEnglishPokemonCard(row)) return "non-English or non-Pokemon card signal";
-        if (request.RequirePsa10 && row.Price("manual-only-price") is null) return "missing PSA 10 price";
+        if (!request.IncludeProductsWithoutRequestedGrade && request.RequireAnyRequestedGrade && !HasAnyRequestedGrade(row, grades)) return "missing requested grade price";
         return null;
+    }
+
+    private static bool HasAnyRequestedGrade(CsvRow row, IReadOnlyList<GradeDefinition> grades)
+        => grades.Any(grade => grade.PriceChartingBulkField is not null && row.Price(grade.PriceChartingBulkField) is not null);
+
+    private static IEnumerable<PriceChartingGradeCoverage> BuildCoverage(IReadOnlyList<CsvRow> rows, IReadOnlyList<string> headers, IReadOnlyList<GradeDefinition> requestedGrades)
+    {
+        var requested = new HashSet<string>(requestedGrades.Select(x => x.Code), StringComparer.OrdinalIgnoreCase);
+        return GradeDefinitions.All
+            .Select(grade =>
+            {
+                var sourceField = grade.PriceChartingBulkField;
+                var fieldPresent = sourceField is not null && headers.Contains(sourceField, StringComparer.OrdinalIgnoreCase);
+                var rowsWithValue = sourceField is null ? 0 : rows.Count(row => row.Price(sourceField) is not null);
+                var status = grade.IsBulkPriceSupported
+                    ? fieldPresent ? rowsWithValue > 0 ? "Available" : "Missing" : "Missing"
+                    : "Unsupported";
+                return new PriceChartingGradeCoverage(grade.Code, grade.DisplayName, sourceField, grade.IsBulkPriceSupported, requested.Contains(grade.Code), fieldPresent, rowsWithValue, status);
+            })
+            .OrderBy(x => GradeDefinitions.GetRequired(x.GradeCode).DisplayOrder);
     }
 
     private static IReadOnlyDictionary<string, string?> ToCatalogRow(CsvRow row, string category, DateTimeOffset capturedAtUtc)
@@ -346,7 +375,7 @@ public sealed class PokemonMasterCatalogCsvService
     private static async Task<IReadOnlyList<IReadOnlyDictionary<string, string?>>> ReadCatalogCsvAsync(string path, int? limit, CancellationToken ct)
     {
         var csv = await File.ReadAllTextAsync(path, ct);
-        var rows = Parse(csv).Select(row => (IReadOnlyDictionary<string, string?>)row.Fields).ToList();
+        var rows = Parse(csv).Rows.Select(row => (IReadOnlyDictionary<string, string?>)row.Fields).ToList();
         return limit is null ? rows : rows.Take(limit.Value).ToArray();
     }
 
@@ -592,11 +621,11 @@ END;
             ParseDecimal(row.GetValueOrDefault("Psa10Price")),
             ParseInt(row.GetValueOrDefault("SalesVolumeYearly")));
 
-    private static IReadOnlyList<CsvRow> Parse(string csv)
+    private static CsvDocument Parse(string csv)
     {
         using var reader = new StringReader(csv);
         var headerLine = reader.ReadLine();
-        if (string.IsNullOrWhiteSpace(headerLine)) return Array.Empty<CsvRow>();
+        if (string.IsNullOrWhiteSpace(headerLine)) return new CsvDocument(Array.Empty<string>(), Array.Empty<CsvRow>());
 
         var headers = ParseLine(headerLine).Select(header => header.Trim()).ToArray();
         var rows = new List<CsvRow>();
@@ -612,8 +641,10 @@ END;
             rows.Add(new CsvRow(fields));
         }
 
-        return rows;
+        return new CsvDocument(headers, rows);
     }
+
+    private sealed record CsvDocument(string[] Headers, IReadOnlyList<CsvRow> Rows);
 
     private static List<string> ParseLine(string line)
     {
@@ -659,6 +690,13 @@ END;
             ? $"\"{value.Replace("\"", "\"\"", StringComparison.Ordinal)}\""
             : value;
     }
+
+    private static readonly string[] RecognizedHeaders =
+    {
+        "id", "product-name", "console-name", "genre", "release-date", "tcg-id", "upc", "asin", "loose-price", "graded-price",
+        "manual-only-price", "bgs-10-price", "condition-17-price", "condition-18-price", "new-price", "cib-price", "box-only-price",
+        "retail-loose-buy", "retail-loose-sell", "retail-new-buy", "retail-new-sell", "retail-cib-buy", "retail-cib-sell", "sales-volume"
+    };
 
     private sealed record CsvRow(IReadOnlyDictionary<string, string?> Fields)
     {

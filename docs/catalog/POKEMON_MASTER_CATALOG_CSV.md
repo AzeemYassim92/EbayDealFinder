@@ -118,3 +118,35 @@ Import creates/upserts:
 Use `docs/sql/queries/07_pokemon_master_catalog_exploration.sql` for SSMS review.
 
 
+
+## Graded Catalog Policy Update
+
+Last updated: 2026-06-20
+
+The catalog builder no longer needs PSA 10 to be the only acceptance gate. It accepts a grade policy through `--grades` and can keep a row when any requested supported grade has a value.
+
+Recommended bounded validation command:
+
+```powershell
+dotnet run --project src/P2W.DealFinder.Worker -- pokemon-catalog-build --category pokemon-cards --grades psa10,bgs10 --limit 500 --output data/generated/pokemon_master_catalog_test.csv
+```
+
+Relevant switches:
+
+- `--grades psa10,bgs10`: request one or more centralized grade codes.
+- `--require-any-requested-grade`: keep only rows with at least one requested grade value.
+- `--include-products-without-requested-grade`: keep rows even when requested grade values are missing.
+- `--require-psa10`: compatibility alias for `--grades psa10` with the older PSA 10 gate.
+- `--include-missing-psa10`: compatibility alias for including rows without requested grade values.
+
+The wide CSV fields remain for fast review and compatibility:
+
+- `UngradedPrice`
+- `Grade9Price`
+- `Psa10Price`
+- `Bgs10Price`
+- `Cgc10Price` for standard CGC 10
+- `Sgc10Price`
+
+Canonical grade history now belongs in `dbo.PriceChartingGradePriceSnapshots` and `dbo.vw_PriceChartingLatestGradePrices`. Premium grade codes such as `cgc10-pristine`, `bgs10-black`, and `tag10` are represented with explicit unsupported/missing status when the provider does not expose a verified bulk field.
+

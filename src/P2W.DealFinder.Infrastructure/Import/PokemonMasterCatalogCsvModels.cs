@@ -1,4 +1,4 @@
-namespace P2W.DealFinder.Infrastructure.Import;
+﻿namespace P2W.DealFinder.Infrastructure.Import;
 
 public sealed record PokemonMasterCatalogBuildRequest(
     string Token,
@@ -6,7 +6,9 @@ public sealed record PokemonMasterCatalogBuildRequest(
     string OutputPath,
     int? Limit,
     bool EnglishOnly,
-    bool RequirePsa10);
+    string[] GradeCodes,
+    bool RequireAnyRequestedGrade,
+    bool IncludeProductsWithoutRequestedGrade);
 
 public sealed record PokemonMasterCatalogBuildResult(
     string OutputPath,
@@ -16,6 +18,9 @@ public sealed record PokemonMasterCatalogBuildResult(
     int SkippedRows,
     int LikelyTcgRows,
     int RowsWithPsa10,
+    IReadOnlyList<PriceChartingGradeCoverage> GradeCoverage,
+    IReadOnlyList<string> CsvHeaders,
+    IReadOnlyList<string> UnrecognizedHeaders,
     DateTimeOffset SourceCapturedAtUtc,
     IReadOnlyList<PokemonMasterCatalogSkippedReason> SkipReasons,
     IReadOnlyList<PokemonMasterCatalogPreview> PreviewRows);

@@ -691,3 +691,61 @@ h2 { margin-bottom: 0; font-size: 22px; line-height: 1.15; }
   .ebay-controls,
   .deal-kpis { grid-template-columns: 1fr; }
 }
+
+.control-group {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(227, 191, 44, 0.45);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.control-group legend {
+  padding: 0 6px;
+  color: #f0c928;
+  font-size: 12px;
+  font-weight: 950;
+  text-transform: uppercase;
+}
+
+.checkbox-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  color: var(--paper);
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.checkbox-row input { width: 16px; height: 16px; }
+
+.request-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 14px;
+}
+
+.request-strip span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 5px 9px;
+  border: 1px solid rgba(227, 191, 44, 0.55);
+  border-radius: 999px;
+  background: #11100b;
+  color: #f8fafc;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.deal-card.failed {
+  border-color: rgba(185, 28, 28, 0.45);
+}
+
+.deal-card.failed .confidence {
+  background: #fee2e2;
+  color: #991b1b;
+}

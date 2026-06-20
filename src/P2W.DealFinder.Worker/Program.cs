@@ -1,7 +1,8 @@
-﻿using System.Globalization;
+using System.Globalization;
 using System.Text.Json;
 using Microsoft.Data.SqlClient;
 using P2W.DealFinder.Application.DealScoring;
+using P2W.DealFinder.Application.Grading;
 using P2W.DealFinder.Domain.Shared;
 using P2W.DealFinder.Infrastructure.Import;
 
@@ -38,9 +39,9 @@ static int Help()
     Console.WriteLine("Commands:");
     Console.WriteLine("  deal-finder import-set --game pokemon --set \"Chaos Rising\" --dry-run");
     Console.WriteLine("  deal-finder import-set --game pokemon --set CHR");
-    Console.WriteLine("  deal-finder pricecharting-import --category pokemon-cards --dry-run");
+    Console.WriteLine("  deal-finder pricecharting-import --category pokemon-cards --grades psa10,bgs10 --dry-run");
     Console.WriteLine("  deal-finder pricecharting-import --category pokemon-cards --limit 500");
-    Console.WriteLine("  deal-finder pokemon-catalog-build --category pokemon-cards --output data/generated/pokemon_master_catalog.csv");
+    Console.WriteLine("  deal-finder pokemon-catalog-build --category pokemon-cards --grades psa10,bgs10 --output data/generated/pokemon_master_catalog.csv");
     Console.WriteLine("  deal-finder pokemon-catalog-import --csv data/generated/pokemon_master_catalog.csv --dry-run");
     Console.WriteLine("  deal-finder scan --profile default --dry-run");
     Console.WriteLine("  deal-finder scan-set --game pokemon --set \"Phantasmal Flames\" --dry-run");
@@ -112,7 +113,9 @@ static async Task<int> PokemonCatalogBuild(string[] args)
     var output = ReadOption(args, "--output") ?? DefaultPokemonCatalogCsvPath();
     var limit = ReadIntOption(args, "--limit");
     var englishOnly = !HasFlag(args, "--include-non-english");
-    var requirePsa10 = HasFlag(args, "--require-psa10");
+    var includeProductsWithoutRequestedGrade = HasFlag(args, "--include-products-without-requested-grade") || HasFlag(args, "--include-missing-psa10");
+    var requireAnyRequestedGrade = HasFlag(args, "--require-any-requested-grade") || !includeProductsWithoutRequestedGrade;
+    var grades = HasFlag(args, "--require-psa10") ? new[] { GradeDefinitions.Psa10 } : ReadGradeCodes(args);
     var token = ReadOption(args, "--token")
         ?? Environment.GetEnvironmentVariable("PRICECHARTING_TOKEN")
         ?? Environment.GetEnvironmentVariable("PRICECHARTING_API_TOKEN")
@@ -131,17 +134,23 @@ static async Task<int> PokemonCatalogBuild(string[] args)
         output,
         limit,
         englishOnly,
-        requirePsa10), CancellationToken.None);
+        grades,
+        requireAnyRequestedGrade,
+        includeProductsWithoutRequestedGrade), CancellationToken.None);
 
     Console.WriteLine("Pokemon master catalog CSV build complete.");
     Console.WriteLine($"Output: {result.OutputPath}");
     Console.WriteLine($"Category: {result.Category}");
     Console.WriteLine($"Provider rows: {result.TotalProviderRows}");
+    Console.WriteLine($"CSV headers: {result.CsvHeaders.Count}");
     Console.WriteLine($"Catalog rows: {result.CatalogRowsWritten}");
     Console.WriteLine($"Likely Pokemon TCG rows: {result.LikelyTcgRows}");
     Console.WriteLine($"Rows with PSA 10 price: {result.RowsWithPsa10}");
     Console.WriteLine($"Skipped while scanning: {result.SkippedRows}");
-    Console.WriteLine($"Filters: englishOnly={englishOnly}; requirePsa10={requirePsa10}; limit={limit?.ToString(CultureInfo.InvariantCulture) ?? "all"}");
+    Console.WriteLine($"Filters: englishOnly={englishOnly}; grades={string.Join(',', grades)}; requireAnyRequestedGrade={requireAnyRequestedGrade}; includeProductsWithoutRequestedGrade={includeProductsWithoutRequestedGrade}; limit={limit?.ToString(CultureInfo.InvariantCulture) ?? "all"}");
+
+    PrintGradeCoverage(result.GradeCoverage);
+    PrintUnknownHeaders(result.UnrecognizedHeaders);
 
     if (result.SkipReasons.Count > 0)
     {
@@ -156,7 +165,6 @@ static async Task<int> PokemonCatalogBuild(string[] args)
     PrintPokemonCatalogPreview(result.PreviewRows);
     return result.CatalogRowsWritten == 0 ? 2 : 0;
 }
-
 static async Task<int> PokemonCatalogImport(string[] args)
 {
     var csv = ReadOption(args, "--csv") ?? DefaultPokemonCatalogCsvPath();
@@ -192,7 +200,9 @@ static async Task<int> PriceChartingImport(string[] args)
     var category = ReadOption(args, "--category") ?? "pokemon-cards";
     var dryRun = HasFlag(args, "--dry-run");
     var englishOnly = !HasFlag(args, "--include-non-english");
-    var requirePsa10 = !HasFlag(args, "--include-missing-psa10");
+    var includeProductsWithoutRequestedGrade = HasFlag(args, "--include-products-without-requested-grade") || HasFlag(args, "--include-missing-psa10");
+    var requireAnyRequestedGrade = HasFlag(args, "--require-any-requested-grade") || !includeProductsWithoutRequestedGrade;
+    var grades = HasFlag(args, "--require-psa10") ? new[] { GradeDefinitions.Psa10 } : ReadGradeCodes(args);
     var limit = ReadIntOption(args, "--limit");
     var token = ReadOption(args, "--token")
         ?? Environment.GetEnvironmentVariable("PRICECHARTING_TOKEN")
@@ -220,7 +230,9 @@ static async Task<int> PriceChartingImport(string[] args)
         dryRun,
         limit,
         englishOnly,
-        requirePsa10), CancellationToken.None);
+        grades,
+        requireAnyRequestedGrade,
+        includeProductsWithoutRequestedGrade), CancellationToken.None);
 
     Console.WriteLine(dryRun ? "PriceCharting snapshot dry run complete." : "PriceCharting snapshot import complete.");
     Console.WriteLine($"Run: {result.RunId}");
@@ -228,8 +240,12 @@ static async Task<int> PriceChartingImport(string[] args)
     Console.WriteLine($"Target DB: {result.TargetDatabase}");
     Console.WriteLine($"Captured UTC: {result.CapturedAtUtc:O}");
     Console.WriteLine($"Rows: {result.TotalRows} total / {result.AcceptedRows} accepted / {result.SkippedRows} skipped");
-    Console.WriteLine($"Writes: {result.ProductsWritten} products / {result.SnapshotsWritten} snapshots");
-    Console.WriteLine($"Filters: englishOnly={englishOnly}; requirePsa10={requirePsa10}; limit={limit?.ToString(CultureInfo.InvariantCulture) ?? "all"}");
+    Console.WriteLine($"Writes: {result.ProductsWritten} products / {result.SnapshotsWritten} snapshots / {result.GradeSnapshotsWritten} grade snapshots");
+    Console.WriteLine($"CSV headers: {result.CsvHeaders.Count}");
+    Console.WriteLine($"Filters: englishOnly={englishOnly}; grades={string.Join(',', grades)}; requireAnyRequestedGrade={requireAnyRequestedGrade}; includeProductsWithoutRequestedGrade={includeProductsWithoutRequestedGrade}; limit={limit?.ToString(CultureInfo.InvariantCulture) ?? "all"}");
+
+    PrintGradeCoverage(result.GradeCoverage);
+    PrintUnknownHeaders(result.UnrecognizedHeaders);
 
     if (result.SkipReasons.Count > 0)
     {
@@ -248,7 +264,8 @@ static async Task<int> PriceChartingImport(string[] args)
         Console.WriteLine("ProductId | Name | Console | Raw | Grade 9 | PSA 10 | BGS 10 | CGC 10 | SGC 10 | Volume");
         foreach (var row in result.PreviewRows)
         {
-            Console.WriteLine($"{row.ProductId} | {row.ProductName} | {row.ConsoleName} | {Money(row.UngradedPrice)} | {Money(row.Grade9Price)} | {Money(row.Psa10Price)} | {Money(row.Bgs10Price)} | {Money(row.Cgc10Price)} | {Money(row.Sgc10Price)} | {row.SalesVolume?.ToString(CultureInfo.InvariantCulture) ?? "-"}");
+            var volume = row.SalesVolume?.ToString(CultureInfo.InvariantCulture) ?? "-";
+            Console.WriteLine($"{row.ProductId} | {row.ProductName} | {row.ConsoleName} | {Money(row.UngradedPrice)} | {Money(row.Grade9Price)} | {Money(row.Psa10Price)} | {Money(row.Bgs10Price)} | {Money(row.Cgc10Price)} | {Money(row.Sgc10Price)} | {volume}");
         }
     }
 
@@ -389,6 +406,48 @@ static string? ReadOption(string[] args, string name)
 
 static bool HasFlag(string[] args, string name)
     => args.Any(a => string.Equals(a, name, StringComparison.OrdinalIgnoreCase));
+
+static string[] ReadGradeCodes(string[] args)
+{
+    var value = ReadOption(args, "--grades");
+    return GradeDefinitions.ResolveMany(value?.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries), defaultToPrimary: true)
+        .Select(grade => grade.Code)
+        .ToArray();
+}
+
+static void PrintGradeCoverage(IReadOnlyList<PriceChartingGradeCoverage> coverage)
+{
+    if (coverage.Count == 0) return;
+
+    Console.WriteLine();
+    Console.WriteLine("Grade coverage:");
+    Console.WriteLine("Grade | Source | Bulk | Requested | Field | Rows | Status");
+    foreach (var row in coverage.OrderBy(x => GradeDefinitions.GetRequired(x.GradeCode).DisplayOrder))
+    {
+        var source = string.IsNullOrWhiteSpace(row.SourceField) ? row.AvailabilityStatus : row.SourceField;
+        Console.WriteLine($"{row.GradeLabel} | {source} | {YesNo(row.BulkSupported)} | {YesNo(row.Requested)} | {YesNo(row.FieldPresent)} | {row.RowsWithValue} | {row.AvailabilityStatus}");
+    }
+}
+
+static void PrintUnknownHeaders(IReadOnlyList<string> headers)
+{
+    if (headers.Count == 0) return;
+
+    Console.WriteLine();
+    Console.WriteLine("Unrecognized CSV headers:");
+    foreach (var header in headers.Take(20))
+    {
+        Console.WriteLine($"  {header}");
+    }
+
+    if (headers.Count > 20)
+    {
+        Console.WriteLine($"  ... {headers.Count - 20} more");
+    }
+}
+
+static string YesNo(bool value)
+    => value ? "yes" : "no";
 
 static string DeriveTargetConnection(string sourceConnection, string databaseName)
 {

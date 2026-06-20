@@ -7,7 +7,9 @@ public sealed record PriceChartingSnapshotImportRequest(
     bool DryRun,
     int? Limit,
     bool EnglishOnly,
-    bool RequirePsa10,
+    string[] GradeCodes,
+    bool RequireAnyRequestedGrade,
+    bool IncludeProductsWithoutRequestedGrade,
     bool CreateTargetDatabase = true);
 
 public sealed record PriceChartingSnapshotImportResult(
@@ -18,13 +20,27 @@ public sealed record PriceChartingSnapshotImportResult(
     int SkippedRows,
     int ProductsWritten,
     int SnapshotsWritten,
+    int GradeSnapshotsWritten,
     bool DryRun,
     string TargetDatabase,
     DateTimeOffset CapturedAtUtc,
     IReadOnlyList<PriceChartingSkippedReason> SkipReasons,
+    IReadOnlyList<PriceChartingGradeCoverage> GradeCoverage,
+    IReadOnlyList<string> CsvHeaders,
+    IReadOnlyList<string> UnrecognizedHeaders,
     IReadOnlyList<PriceChartingSnapshotPreview> PreviewRows);
 
 public sealed record PriceChartingSkippedReason(string Reason, int Count);
+
+public sealed record PriceChartingGradeCoverage(
+    string GradeCode,
+    string GradeLabel,
+    string? SourceField,
+    bool BulkSupported,
+    bool Requested,
+    bool FieldPresent,
+    int RowsWithValue,
+    string AvailabilityStatus);
 
 public sealed record PriceChartingSnapshotPreview(
     string ProductId,

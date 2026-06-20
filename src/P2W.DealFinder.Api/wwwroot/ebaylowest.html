@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>P2W DealFinder eBay Lowest</title>
+  <title>P2W DealFinder Graded Scan</title>
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
@@ -14,7 +14,7 @@
     </a>
     <nav class="tabs" aria-label="DealFinder pages">
       <a href="/scan">Price Scan</a>
-      <a class="active" href="/ebaylowest">eBay Lowest</a>
+      <a class="active" href="/ebaylowest">Graded Scan</a>
       <a href="/auctionscan">Auction Scan</a>
       <a href="/productdetails?source=pricecharting">PriceCharting Detail</a>
       <a href="/productdetails?source=justtcg">JustTCG Detail</a>
@@ -22,7 +22,7 @@
     <div class="search-shell">
       <span>Pokemon TCG</span>
       <span>English</span>
-      <strong>PSA 10 Buy Now Sweep</strong>
+      <strong>Graded Deal Scan</strong>
     </div>
   </header>
 
@@ -30,47 +30,49 @@
     <section class="scan-hero">
       <div>
         <p class="eyebrow">Live Market Scout</p>
-        <h1>eBay Lowest PSA 10</h1>
-        <p class="subtitle">Broad low-to-high eBay sweep matched against the local PriceCharting-backed catalog.</p>
+        <h1>Graded Deal Scan</h1>
+        <p class="subtitle">Cross-reference eBay graded listings against local PriceCharting catalog values and deal economics.</p>
       </div>
       <div id="scanStatus" class="provider-pill">Ready</div>
     </section>
 
-    <section class="panel scan-controls ebay-controls" aria-label="eBay broad scan filters">
+    <section class="panel scan-controls ebay-controls" aria-label="Graded scan filters">
+      <fieldset class="control-group">
+        <legend>Grades</legend>
+        <label class="checkbox-row"><input data-grade="psa10" type="checkbox" checked /> PSA 10</label>
+        <label class="checkbox-row"><input data-grade="cgc10-pristine" type="checkbox" /> CGC 10 Pristine</label>
+        <label class="checkbox-row"><input data-grade="bgs10-black" type="checkbox" /> BGS 10 Black Label</label>
+        <label class="checkbox-row"><input data-grade="bgs10" type="checkbox" /> BGS 10</label>
+        <label class="checkbox-row"><input data-grade="tag10" type="checkbox" /> TAG 10</label>
+      </fieldset>
+
       <label>
-        <span>Query</span>
-        <input id="query" type="text" value="Pokemon PSA 10" />
+        <span>Query Override</span>
+        <input id="query" type="text" placeholder="empty uses grade-specific query" />
       </label>
       <label>
-        <span>Pages</span>
-        <input id="pages" type="number" min="1" max="100" step="1" value="1" />
+        <span>Pages / Grade</span>
+        <input id="pagesPerGrade" type="number" min="1" max="25" step="1" value="1" />
       </label>
       <label>
         <span>Limit</span>
-        <input id="take" type="number" min="1" max="250" step="1" value="50" />
-      </label>
-      <label>
-        <span>Min Listing</span>
-        <input id="minListing" type="number" min="0" step="1" value="10" />
-      </label>
-      <label>
-        <span>Max Listing</span>
-        <input id="maxListing" type="number" min="1" step="1" value="1000" />
-      </label>
-      <label>
-        <span>Condition</span>
-        <select id="condition">
-          <option value="graded" selected>Graded</option>
-          <option value="">Any</option>
-        </select>
+        <input id="take" type="number" min="1" max="250" step="1" value="100" />
       </label>
       <label>
         <span>Min Market</span>
-        <input id="minMarket" type="number" min="0" step="1" value="25" />
+        <input id="minMarketValue" type="number" min="0" step="1" value="50" />
       </label>
       <label>
         <span>Max Market</span>
-        <input id="maxMarket" type="number" min="1" step="1" value="500" />
+        <input id="maxMarketValue" type="number" min="1" step="1" value="250" />
+      </label>
+      <label>
+        <span>Min Buy</span>
+        <input id="minEffectiveBuyPrice" type="number" min="0" step="1" value="10" />
+      </label>
+      <label>
+        <span>Max Buy</span>
+        <input id="maxEffectiveBuyPrice" type="number" min="1" step="1" value="250" />
       </label>
       <label>
         <span>Min Profit</span>
@@ -78,13 +80,56 @@
       </label>
       <label>
         <span>Min Margin %</span>
-        <input id="minMargin" type="number" min="0" step="1" value="10" />
+        <input id="minMarginPercent" type="number" min="0" step="1" value="10" />
       </label>
       <label>
         <span>Min ROI %</span>
-        <input id="minRoi" type="number" min="0" step="1" value="10" />
+        <input id="minRoiPercent" type="number" min="0" step="1" value="10" />
       </label>
-      <button id="runScan" type="button" class="primary">Run eBay Sweep</button>
+      <label>
+        <span>Match Score</span>
+        <input id="minMatchScore" type="number" min="60" max="100" step="1" value="75" />
+      </label>
+      <label>
+        <span>Min 1yr Volume</span>
+        <input id="minProductYearlyVolume" type="number" min="0" step="1" value="0" />
+      </label>
+      <label>
+        <span>Fee %</span>
+        <input id="feePercent" type="number" min="0" step="0.01" value="13.25" />
+      </label>
+      <label>
+        <span>Fixed Fee</span>
+        <input id="fixedFee" type="number" min="0" step="0.01" value="0.30" />
+      </label>
+      <label>
+        <span>Outbound Ship</span>
+        <input id="outboundShippingCost" type="number" min="0" step="0.01" value="5.00" />
+      </label>
+      <label>
+        <span>Packing</span>
+        <input id="packingCost" type="number" min="0" step="0.01" value="1.00" />
+      </label>
+      <label>
+        <span>Buffer</span>
+        <input id="bufferCost" type="number" min="0" step="0.01" value="2.00" />
+      </label>
+      <label>
+        <span>Sort</span>
+        <select id="sortBy">
+          <option value="profit">Net profit</option>
+          <option value="roi">ROI</option>
+          <option value="buy">Effective buy</option>
+          <option value="market">Market value</option>
+          <option value="volume">Volume</option>
+          <option value="confidence">Match confidence</option>
+        </select>
+      </label>
+      <label class="checkbox-row"><input id="showOnlyPassingDeals" type="checkbox" /> Passing only</label>
+      <label class="checkbox-row"><input id="includeBuyNow" type="checkbox" checked /> Buy Now</label>
+      <label class="checkbox-row"><input id="includeAuctions" type="checkbox" /> Auctions</label>
+      <button id="runScan" type="button" class="primary">Run Graded Scan</button>
+      <button id="resetDefaults" type="button">Reset Defaults</button>
     </section>
 
     <section class="metric-grid scan-metrics" id="scanMetrics"></section>
@@ -93,12 +138,12 @@
       <div class="panel-heading">
         <div>
           <p class="eyebrow">Deal Candidates</p>
-          <h2 id="resultTitle">No sweep run yet</h2>
+          <h2 id="resultTitle">No scan run yet</h2>
         </div>
-        <a id="searchUrl" class="external-button" href="#" target="_blank" rel="noreferrer" hidden>Open eBay Search</a>
       </div>
+      <div id="appliedRequest" class="request-strip"></div>
       <div id="dealRows" class="deal-grid">
-        <div class="empty-state">Run the eBay sweep to load matched buy-now opportunities.</div>
+        <div class="empty-state">Run the graded scan to load matched opportunities.</div>
       </div>
     </section>
 
@@ -106,11 +151,11 @@
       <section class="panel">
         <div class="panel-heading compact-heading">
           <div>
-            <p class="eyebrow">Parser Diagnostics</p>
-            <h2>Returned Page</h2>
+            <p class="eyebrow">Grade Runs</p>
+            <h2>Search Coverage</h2>
           </div>
         </div>
-        <div id="pageDiagnostics" class="rows"></div>
+        <div id="gradeRuns" class="rows"></div>
       </section>
 
       <section class="panel">
@@ -128,4 +173,3 @@
   <script src="/ebaylowest.js" type="module"></script>
 </body>
 </html>
-

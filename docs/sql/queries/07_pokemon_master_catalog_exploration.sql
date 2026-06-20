@@ -161,3 +161,61 @@ WHERE Language = 'English'
       OR PriceChartingProductName LIKE '%Sticker%'
   )
 ORDER BY ProductFamily, SetName, CardName;
+
+/* 10. Catalog grade coverage across existing wide fields */
+SELECT
+    COUNT(*) AS CatalogRows,
+    SUM(CASE WHEN UngradedPrice IS NOT NULL THEN 1 ELSE 0 END) AS RowsWithUngraded,
+    SUM(CASE WHEN Grade9Price IS NOT NULL THEN 1 ELSE 0 END) AS RowsWithGrade9,
+    SUM(CASE WHEN Psa10Price IS NOT NULL THEN 1 ELSE 0 END) AS RowsWithPsa10,
+    SUM(CASE WHEN Bgs10Price IS NOT NULL THEN 1 ELSE 0 END) AS RowsWithBgs10,
+    SUM(CASE WHEN Cgc10Price IS NOT NULL THEN 1 ELSE 0 END) AS RowsWithStandardCgc10,
+    SUM(CASE WHEN Sgc10Price IS NOT NULL THEN 1 ELSE 0 END) AS RowsWithSgc10
+FROM dbo.PokemonMasterCatalog
+WHERE Language = 'English';
+
+/* 11. PSA 10 missing but another supported graded value present */
+SELECT TOP (250)
+    SetName,
+    CardNumber,
+    CardName,
+    VariantName,
+    PriceChartingProductId,
+    Psa10Price,
+    Bgs10Price,
+    Cgc10Price AS StandardCgc10Price,
+    Sgc10Price,
+    Grade9Price,
+    SalesVolumeYearly,
+    PriceChartingProductUrl
+FROM dbo.PokemonMasterCatalog
+WHERE Language = 'English'
+  AND Psa10Price IS NULL
+  AND (Bgs10Price IS NOT NULL OR Cgc10Price IS NOT NULL OR Sgc10Price IS NOT NULL OR Grade9Price IS NOT NULL)
+ORDER BY SalesVolumeYearly DESC, SetName, CardName;
+
+/* 12. Cross-check catalog rows against latest normalized grade snapshots */
+DECLARE @CatalogGradeCode nvarchar(50) = 'bgs10';
+
+IF OBJECT_ID('dbo.vw_PriceChartingLatestGradePrices', 'V') IS NOT NULL
+BEGIN
+    SELECT TOP (250)
+        c.SetName,
+        c.CardNumber,
+        c.CardName,
+        c.VariantName,
+        c.PriceChartingProductId,
+        g.GradeCode,
+        g.GradeLabel,
+        g.MarketPrice,
+        g.SourceKind,
+        g.SourceField,
+        g.AvailabilityStatus,
+        g.CapturedAtUtc,
+        c.PriceChartingProductUrl
+    FROM dbo.PokemonMasterCatalog AS c
+    JOIN dbo.vw_PriceChartingLatestGradePrices AS g ON g.ProductId = c.PriceChartingProductId
+    WHERE c.Language = 'English'
+      AND g.GradeCode = @CatalogGradeCode
+    ORDER BY g.MarketPrice DESC, c.SetName, c.CardName;
+END;

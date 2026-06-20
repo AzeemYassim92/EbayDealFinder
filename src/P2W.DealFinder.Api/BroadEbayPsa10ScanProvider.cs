@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Data.SqlClient;
+using P2W.DealFinder.Application.Grading;
 
 namespace P2W.DealFinder.Api;
 
@@ -26,9 +27,10 @@ public static class BroadEbayPsa10ScanProvider
         CancellationToken ct)
     {
         var normalized = request.Normalize();
+        var grade = GradeDefinitions.GetRequired(normalized.GradeCode);
         var catalog = string.IsNullOrWhiteSpace(connectionString)
             ? Array.Empty<BroadCatalogCard>()
-            : await LoadCatalogAsync(connectionString!, ct);
+            : await LoadCatalogAsync(connectionString!, grade, ct);
 
         var allListings = new List<BroadEbayListingView>();
         var stats = BroadEbayStats.Empty;
@@ -38,13 +40,13 @@ public static class BroadEbayPsa10ScanProvider
         {
             var searchUrl = BuildSearchUrl(normalized, page);
             searchUrls.Add(searchUrl);
-            var pageResult = await FetchPageAsync(zyteApiKey, searchUrl, page, ct);
+            var pageResult = await FetchPageAsync(zyteApiKey, searchUrl, page, grade, ct);
             stats = stats.Add(pageResult.Stats);
             allListings.AddRange(pageResult.Listings);
         }
 
         var matched = allListings
-            .Select(listing => MatchAndScore(listing, catalog, normalized))
+            .Select(listing => MatchAndScore(listing, catalog, normalized, grade))
             .Where(row => row is not null)
             .Select(row => row!)
             .OrderByDescending(row => row.PassesHardFilters)
@@ -80,10 +82,14 @@ public static class BroadEbayPsa10ScanProvider
             CapturedAtUtc: DateTimeOffset.UtcNow,
             SearchUrls: searchUrls.ToArray(),
             Stats: stats,
-            Results: matched);
+            Results: matched,
+            GradeCode: grade.Code,
+            GradeLabel: grade.DisplayName,
+            EbayCategoryId: normalized.EbayCategoryId,
+            EbayCategoryName: normalized.EbayCategoryName);
     }
 
-    private static async Task<EbayBroadPageResult> FetchPageAsync(string apiKey, string searchUrl, int page, CancellationToken ct)
+    private static async Task<EbayBroadPageResult> FetchPageAsync(string apiKey, string searchUrl, int page, GradeDefinition grade, CancellationToken ct)
     {
         if (PageCache.TryGetValue(searchUrl, out var existing) && DateTimeOffset.UtcNow - existing.CapturedAtUtc < PageCacheDuration)
         {
@@ -118,7 +124,7 @@ public static class BroadEbayPsa10ScanProvider
                 return failed;
             }
 
-            var parsed = ParseListingSearch(ExtractHtml(json), searchUrl, page);
+            var parsed = ParseListingSearch(ExtractHtml(json), searchUrl, page, grade);
             PageCache[searchUrl] = new EbayBroadPageCache(DateTimeOffset.UtcNow, parsed);
             return parsed;
         }
@@ -138,7 +144,7 @@ public static class BroadEbayPsa10ScanProvider
         }
     }
 
-    private static EbayBroadPageResult ParseListingSearch(string html, string searchUrl, int page)
+    private static EbayBroadPageResult ParseListingSearch(string html, string searchUrl, int page, GradeDefinition grade)
     {
         var listings = new List<BroadEbayListingView>();
         var stats = BroadEbayStats.Empty with { PageDiagnostics = new[] { BuildPageDiagnostic(html, page) } };
@@ -180,7 +186,7 @@ public static class BroadEbayPsa10ScanProvider
             }
 
             stats = stats with { ParsedListings = stats.ParsedListings + 1 };
-            var slabSignal = ClassifyPsa10SlabTitle(title);
+            var slabSignal = ClassifyGradedSlabTitle(title, grade);
             if (!slabSignal.IsPsa10Slab || slabSignal.Score < 75)
             {
                 stats = stats.AddBroadRejection(slabSignal.Status, title, CleanEbayUrl(url), price.Value, slabSignal.Reasons);
@@ -214,7 +220,8 @@ public static class BroadEbayPsa10ScanProvider
     private static BroadEbayDealCandidate? MatchAndScore(
         BroadEbayListingView listing,
         IReadOnlyList<BroadCatalogCard> catalog,
-        BroadEbayPsa10ScanRequest request)
+        BroadEbayPsa10ScanRequest request,
+        GradeDefinition grade)
     {
         var match = MatchCatalog(listing.Title, catalog);
         if (match is null || match.Score < request.MinMatchScore)
@@ -222,14 +229,15 @@ public static class BroadEbayPsa10ScanProvider
             return null;
         }
 
-        if (match.Card.Psa10Price is null
-            || match.Card.Psa10Price < request.MinMarketValue
-            || match.Card.Psa10Price > request.MaxMarketValue)
+        var gradeMarketPrice = match.Card.GradeMarketPrice ?? match.Card.Psa10Price;
+        if (gradeMarketPrice is null
+            || gradeMarketPrice < request.MinMarketValue
+            || gradeMarketPrice > request.MaxMarketValue)
         {
             return null;
         }
 
-        var market = match.Card.Psa10Price.Value;
+        var market = gradeMarketPrice.Value;
         var estimatedFees = Math.Round(market * request.FeePercent + request.FixedFee, 2);
         var estimatedTotalCost = Math.Round(
             listing.EffectivePrice + estimatedFees + request.OutboundShippingCost + request.PackingCost + request.BufferCost,
@@ -255,10 +263,10 @@ public static class BroadEbayPsa10ScanProvider
             UnderMarketPercent: underMarket,
             PassesHardFilters: passes,
             Confidence: match.Score >= 90 ? "High" : match.Score >= 75 ? "Medium" : "Low",
-            ReviewSignals: BuildReviewSignals(match.Card, roi, underMarket));
+            ReviewSignals: BuildReviewSignals(match.Card, roi, underMarket, grade));
     }
 
-    private static string[] BuildReviewSignals(BroadCatalogCard card, decimal roi, decimal underMarket)
+    private static string[] BuildReviewSignals(BroadCatalogCard card, decimal roi, decimal underMarket, GradeDefinition grade)
     {
         var signals = new List<string>();
 
@@ -340,13 +348,32 @@ public static class BroadEbayPsa10ScanProvider
             var candidate = new BroadCatalogMatch(card, score, reasons.Distinct().ToArray());
             if (best is null
                 || candidate.Score > best.Score
-                || candidate.Score == best.Score && (candidate.Card.Psa10Price ?? 0) > (best.Card.Psa10Price ?? 0))
+                || candidate.Score == best.Score && (candidate.Card.GradeMarketPrice ?? candidate.Card.Psa10Price ?? 0) > (best.Card.GradeMarketPrice ?? best.Card.Psa10Price ?? 0))
             {
                 best = candidate;
             }
         }
 
         return best;
+    }
+
+    private static SlabGradeSignal ClassifyGradedSlabTitle(string title, GradeDefinition grade)
+    {
+        var normalizedTitle = Normalize(title);
+        if (!normalizedTitle.Contains("pokemon"))
+        {
+            return SlabGradeSignal.Rejected("NotPokemon", "missing pokemon signal");
+        }
+
+        var result = GradedListingTitleClassifier.Classify(title, grade);
+        if (!result.Accepted)
+        {
+            return new SlabGradeSignal(result.Status, false, result.Score, result.RejectionReasons.Length == 0 ? new[] { $"not a {grade.DisplayName} slab" } : result.RejectionReasons);
+        }
+
+        var reasons = new List<string> { "pokemon" };
+        reasons.AddRange(result.Reasons);
+        return new SlabGradeSignal(result.Status, true, Math.Min(100, result.Score + 10), reasons.Distinct().ToArray());
     }
 
     private static SlabGradeSignal ClassifyPsa10SlabTitle(string title)
@@ -467,18 +494,25 @@ public static class BroadEbayPsa10ScanProvider
         return titleTokens.Any(token => token.Equals(primaryNumber, StringComparison.OrdinalIgnoreCase)) ? 18 : 0;
     }
 
-    private static async Task<IReadOnlyList<BroadCatalogCard>> LoadCatalogAsync(string connectionString, CancellationToken ct)
+    private static async Task<IReadOnlyList<BroadCatalogCard>> LoadCatalogAsync(string connectionString, GradeDefinition grade, CancellationToken ct)
     {
         await CatalogGate.WaitAsync(ct);
         try
         {
-            if (Catalog is not null && DateTimeOffset.UtcNow - Catalog.CapturedAtUtc < CatalogCacheDuration)
+            if (Catalog is not null && Catalog.GradeCode.Equals(grade.Code, StringComparison.OrdinalIgnoreCase) && DateTimeOffset.UtcNow - Catalog.CapturedAtUtc < CatalogCacheDuration)
             {
                 return Catalog.Rows;
             }
 
             var rows = new List<BroadCatalogCard>();
-            const string sql = """
+            var priceColumn = GradePriceColumn(grade);
+            if (priceColumn is null)
+            {
+                Catalog = new CatalogCache(DateTimeOffset.UtcNow, grade.Code, rows);
+                return rows;
+            }
+
+            var sql = $"""
 SELECT
     CatalogKey,
     PriceChartingProductId,
@@ -489,12 +523,13 @@ SELECT
     PriceChartingProductName,
     PriceChartingConsoleName,
     PriceChartingProductUrl,
+    {priceColumn} AS GradeMarketPrice,
     Psa10Price,
     SalesVolumeYearly
 FROM dbo.PokemonMasterCatalog
 WHERE Language = 'English'
   AND IsLikelyPokemonTcg = 1
-  AND Psa10Price IS NOT NULL;
+  AND {priceColumn} IS NOT NULL;
 """;
 
             await using var connection = new SqlConnection(connectionString);
@@ -513,11 +548,16 @@ WHERE Language = 'English'
                     PriceChartingProductName: reader.GetString(6),
                     PriceChartingConsoleName: reader.IsDBNull(7) ? null : reader.GetString(7),
                     PriceChartingProductUrl: reader.IsDBNull(8) ? null : reader.GetString(8),
-                    Psa10Price: reader.IsDBNull(9) ? null : reader.GetDecimal(9),
-                    SalesVolumeYearly: reader.IsDBNull(10) ? null : reader.GetInt32(10)));
+                    Psa10Price: reader.IsDBNull(10) ? null : reader.GetDecimal(10),
+                    SalesVolumeYearly: reader.IsDBNull(11) ? null : reader.GetInt32(11),
+                    GradeCode: grade.Code,
+                    GradeLabel: grade.DisplayName,
+                    GradeMarketPrice: reader.IsDBNull(9) ? null : reader.GetDecimal(9),
+                    GradePriceSource: grade.SourceKind,
+                    GradeSourceField: grade.PriceChartingBulkField));
             }
 
-            Catalog = new CatalogCache(DateTimeOffset.UtcNow, rows);
+            Catalog = new CatalogCache(DateTimeOffset.UtcNow, grade.Code, rows);
             return rows;
         }
         finally
@@ -528,7 +568,8 @@ WHERE Language = 'English'
 
     private static string BuildSearchUrl(BroadEbayPsa10ScanRequest request, int page)
     {
-        var url = $"https://www.ebay.com/sch/i.html?_nkw={WebUtility.UrlEncode(request.Query)}&_sacat=0&LH_PrefLoc=2&LH_BIN=1&_sop=15&_ipg={PageSize}&_pgn={page}";
+        var categoryId = string.IsNullOrWhiteSpace(request.EbayCategoryId) ? EbaySearchScope.DefaultPokemonCards.CategoryId : request.EbayCategoryId;
+        var url = $"https://www.ebay.com/sch/i.html?_nkw={WebUtility.UrlEncode(request.Query)}&_sacat={WebUtility.UrlEncode(categoryId)}&LH_PrefLoc=2&LH_BIN=1&_sop=15&_ipg={PageSize}&_pgn={page}";
 
         if (!string.IsNullOrWhiteSpace(request.EbayConditionId))
         {
@@ -719,7 +760,19 @@ WHERE Language = 'English'
     private sealed record ZyteExtractRequest(string Url, bool BrowserHtml);
     private sealed record EbayBroadPageCache(DateTimeOffset CapturedAtUtc, EbayBroadPageResult Result);
     private sealed record EbayBroadPageResult(int Page, string SearchUrl, IReadOnlyList<BroadEbayListingView> Listings, BroadEbayStats Stats);
-    private sealed record CatalogCache(DateTimeOffset CapturedAtUtc, IReadOnlyList<BroadCatalogCard> Rows);
+    private static string? GradePriceColumn(GradeDefinition grade)
+        => grade.Code switch
+        {
+            GradeDefinitions.Psa10 => "Psa10Price",
+            GradeDefinitions.Bgs10 => "Bgs10Price",
+            GradeDefinitions.Cgc10 => "Cgc10Price",
+            GradeDefinitions.Sgc10 => "Sgc10Price",
+            GradeDefinitions.Grade9 => "Grade9Price",
+            GradeDefinitions.Ungraded => "UngradedPrice",
+            _ => null
+        };
+
+    private sealed record CatalogCache(DateTimeOffset CapturedAtUtc, string GradeCode, IReadOnlyList<BroadCatalogCard> Rows);
     private sealed record SlabGradeSignal(string Status, bool IsPsa10Slab, int Score, string[] Reasons)
     {
         public static SlabGradeSignal Rejected(string status, string reason)
@@ -745,12 +798,16 @@ public sealed record BroadEbayPsa10ScanRequest(
     decimal FixedFee,
     decimal OutboundShippingCost,
     decimal PackingCost,
-    decimal BufferCost)
+    decimal BufferCost,
+    string GradeCode = "psa10",
+    string EbayCategoryId = "183454",
+    string EbayCategoryName = "CCG Individual Cards")
 {
     public BroadEbayPsa10ScanRequest Normalize()
         => this with
         {
-            Query = string.IsNullOrWhiteSpace(Query) ? "Pokemon PSA 10" : Query.Trim(),
+            GradeCode = GradeDefinitions.NormalizeCode(GradeCode),
+            Query = string.IsNullOrWhiteSpace(Query) ? DefaultQuery(GradeDefinitions.GetRequired(GradeDefinitions.NormalizeCode(GradeCode))) : Query.Trim(),
             Pages = Math.Clamp(Pages, 1, 100),
             Take = Math.Clamp(Take, 1, 250),
             EbayCondition = string.IsNullOrWhiteSpace(EbayCondition) ? "graded" : EbayCondition.Trim(),
@@ -763,11 +820,17 @@ public sealed record BroadEbayPsa10ScanRequest(
             MinMarginPercent = Math.Max(0, MinMarginPercent),
             MinRoiPercent = Math.Max(0, MinRoiPercent),
             MinMatchScore = Math.Clamp(MinMatchScore, 60, 100),
-            FeePercent = FeePercent <= 0 ? 0.1325m : FeePercent,
+            FeePercent = FeePercent <= 0 ? 0.1325m : FeePercent > 1m ? FeePercent / 100m : FeePercent,
             FixedFee = Math.Max(0, FixedFee),
             OutboundShippingCost = Math.Max(0, OutboundShippingCost),
             PackingCost = Math.Max(0, PackingCost),
-            BufferCost = Math.Max(0, BufferCost)        };
+            BufferCost = Math.Max(0, BufferCost),
+            EbayCategoryId = string.IsNullOrWhiteSpace(EbayCategoryId) ? EbaySearchScope.DefaultPokemonCards.CategoryId : EbayCategoryId.Trim(),
+            EbayCategoryName = string.IsNullOrWhiteSpace(EbayCategoryName) ? EbaySearchScope.DefaultPokemonCards.CategoryName : EbayCategoryName.Trim()
+        };
+
+    private static string DefaultQuery(GradeDefinition grade)
+        => string.Join(" ", grade.EbayQueryTerms.Concat(new[] { "English" }).Where(term => !string.IsNullOrWhiteSpace(term)));
 
     private static string NormalizeEbayConditionId(string ebayCondition, string ebayConditionId)
     {
@@ -805,7 +868,11 @@ public sealed record BroadEbayPsa10ScanPayload(
     DateTimeOffset CapturedAtUtc,
     string[] SearchUrls,
     BroadEbayStats Stats,
-    BroadEbayDealCandidate[] Results)
+    BroadEbayDealCandidate[] Results,
+    string GradeCode = "psa10",
+    string GradeLabel = "PSA 10",
+    string EbayCategoryId = "183454",
+    string EbayCategoryName = "CCG Individual Cards")
 {
     public static BroadEbayPsa10ScanPayload Blocked(string errorMessage, BroadEbayPsa10ScanRequest request)
     {
@@ -835,7 +902,11 @@ public sealed record BroadEbayPsa10ScanPayload(
             CapturedAtUtc: DateTimeOffset.UtcNow,
             SearchUrls: Array.Empty<string>(),
             Stats: BroadEbayStats.Empty,
-            Results: Array.Empty<BroadEbayDealCandidate>());
+            Results: Array.Empty<BroadEbayDealCandidate>(),
+            GradeCode: normalized.GradeCode,
+            GradeLabel: GradeDefinitions.GetRequired(normalized.GradeCode).DisplayName,
+            EbayCategoryId: normalized.EbayCategoryId,
+            EbayCategoryName: normalized.EbayCategoryName);
     }
 }
 
@@ -977,7 +1048,12 @@ public sealed record BroadCatalogCard(
     string? PriceChartingConsoleName,
     string? PriceChartingProductUrl,
     decimal? Psa10Price,
-    int? SalesVolumeYearly);
+    int? SalesVolumeYearly,
+    string GradeCode = "psa10",
+    string GradeLabel = "PSA 10",
+    decimal? GradeMarketPrice = null,
+    string? GradePriceSource = null,
+    string? GradeSourceField = null);
 
 public sealed record BroadCatalogMatch(
     BroadCatalogCard Card,

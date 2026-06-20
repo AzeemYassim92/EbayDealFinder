@@ -97,3 +97,73 @@ dotnet run --project src/P2W.DealFinder.Worker -- pokemon-catalog-import --csv d
 
 The first full English build produced 44,987 catalog rows from 88,474 PriceCharting provider rows. Generated CSV files live under `data/generated/` and are ignored by git. See `docs/catalog/POKEMON_MASTER_CATALOG_CSV.md` and `docs/sql/queries/07_pokemon_master_catalog_exploration.sql`.
 
+
+## Graded Deal Scan
+
+The scan flow now supports a centralized grade model instead of treating PSA 10 as the only deal target. The default operator page is still static HTML/JS:
+
+```text
+http://127.0.0.1:5178/ebaylowest.html
+```
+
+The page posts to:
+
+```http
+POST /api/scan/graded
+```
+
+Primary scan grades are PSA 10, CGC 10 Pristine, BGS 10 Black Label, BGS 10, and TAG 10. PSA 10 and standard BGS 10 are supported by verified PriceCharting bulk CSV fields. CGC 10 Pristine, BGS 10 Black Label, and TAG 10 are modeled explicitly but are marked unsupported from the bulk CSV unless a permitted product-detail enrichment source is added later.
+
+Verified bulk grade fields from the current PriceCharting CSV:
+
+| Grade | PriceCharting field | Bulk supported | Notes |
+| --- | --- | --- | --- |
+| Ungraded | `loose-price` | Yes | Product-level value. |
+| Grade 9 | `graded-price` | Yes | General grade 9 value. |
+| PSA 10 | `manual-only-price` | Yes | Primary default scan grade. |
+| BGS 10 | `bgs-10-price` | Yes | Standard BGS 10 only, not Black Label. |
+| CGC 10 | `condition-17-price` | Yes | Standard CGC 10 only, not Pristine. |
+| SGC 10 | `condition-18-price` | Yes | Supported but not selected by default. |
+| CGC 10 Pristine | none verified | No | Detail-page only until verified/permitted. |
+| BGS 10 Black Label | none verified | No | Detail-page only until verified/permitted. |
+| TAG 10 | none verified | No | Detail-page only until verified/permitted. |
+
+The latest dry-run saw unrecognized PriceCharting headers `epid`, `gamestop-price`, and `gamestop-trade-price`; these are reported for review and not silently mapped.
+
+### Graded Refresh Commands
+
+```powershell
+dotnet run --project src/P2W.DealFinder.Worker -- pricecharting-import --category pokemon-cards --grades psa10,bgs10 --limit 500 --dry-run
+dotnet run --project src/P2W.DealFinder.Worker -- pokemon-catalog-build --category pokemon-cards --grades psa10,bgs10 --limit 500 --output data/generated/pokemon_master_catalog_test.csv
+dotnet run --project src/P2W.DealFinder.Worker -- pokemon-catalog-import --csv data/generated/pokemon_master_catalog_test.csv --dry-run
+```
+
+### Sample API Request
+
+```json
+{
+  "grades": ["psa10", "bgs10"],
+  "pagesPerGrade": 1,
+  "take": 100,
+  "includeBuyNow": true,
+  "includeAuctions": false,
+  "ebayCategoryId": "183454",
+  "ebayConditionId": "2750",
+  "minMarketValue": 50,
+  "maxMarketValue": 250,
+  "minEffectiveBuyPrice": 10,
+  "maxEffectiveBuyPrice": 250,
+  "minProfit": 10,
+  "minMarginPercent": 10,
+  "minRoiPercent": 10,
+  "minMatchScore": 75,
+  "feePercent": 13.25,
+  "fixedFee": 0.30,
+  "outboundShippingCost": 5.00,
+  "packingCost": 1.00,
+  "bufferCost": 2.00
+}
+```
+
+The configured eBay search scope uses category id `183454` and condition id `2750` for graded. The condition filter is known to be a condition filter; category scoping is applied at search level and should not be described as item-level category validation unless listing metadata confirms it.
+
