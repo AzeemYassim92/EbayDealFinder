@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>P2W DealFinder Auction Scan</title>
+  <title>P2W DealFinder Graded Auction Scan</title>
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
@@ -14,7 +14,7 @@
     </a>
     <nav class="tabs" aria-label="DealFinder pages">
       <a href="/scan">Price Scan</a>
-      <a href="/ebaylowest">eBay Lowest</a>
+      <a href="/ebaylowest">Graded Scan</a>
       <a class="active" href="/auctionscan">Auction Scan</a>
       <a href="/productdetails?source=pricecharting">PriceCharting Detail</a>
       <a href="/productdetails?source=justtcg">JustTCG Detail</a>
@@ -22,50 +22,133 @@
     <div class="search-shell">
       <span>Pokemon TCG</span>
       <span>English</span>
-      <strong>PSA 10 Ending Soon</strong>
+      <strong>Graded Auction Scan</strong>
     </div>
   </header>
 
-  <main class="page scan-page">
+  <main class="page scan-page ebay-page auction-page">
     <section class="scan-hero">
       <div>
         <p class="eyebrow">Auction Scout</p>
-        <h1>PSA 10 Ending Soon</h1>
-        <p class="subtitle">Find English Pokemon PSA 10 auctions ending in the next 6 hours, backed by PriceCharting market data and visible volume context.</p>
+        <h1>Graded Auction Scan</h1>
+        <p class="subtitle">Find correctly graded Pokemon auctions ending within a selected time window and compare the current bid against PriceCharting value and your maximum rational bid.</p>
       </div>
       <div id="scanStatus" class="provider-pill">Ready</div>
     </section>
 
-    <section class="panel scan-controls auction-controls" aria-label="Auction scan filters">
+    <section class="panel auction-note">
+      Current auction bids can increase before close. Profit and ROI shown here are estimates at the captured current bid. DealFinder does not place bids.
+    </section>
+
+    <section class="panel scan-controls auction-v2-controls" aria-label="Graded auction scan filters">
+      <fieldset class="control-group grade-group">
+        <legend>Grades</legend>
+        <label class="checkbox-row"><input data-grade="psa10" type="checkbox" checked /> PSA 10</label>
+        <label class="checkbox-row"><input data-grade="cgc10-pristine" type="checkbox" /> CGC 10 Pristine</label>
+        <label class="checkbox-row"><input data-grade="bgs10-black" type="checkbox" /> BGS 10 Black Label</label>
+        <label class="checkbox-row"><input data-grade="bgs10" type="checkbox" /> BGS 10</label>
+        <label class="checkbox-row"><input data-grade="tag10" type="checkbox" /> TAG 10</label>
+      </fieldset>
+
       <label>
-        <span>Min Auction</span>
-        <input id="minPrice" type="number" min="0" step="1" value="1" />
+        <span>Ending Within</span>
+        <select id="endingWithinHours"></select>
+      </label>
+      <label class="checkbox-row inline-check"><input id="allowWindowExpansion" type="checkbox" /> Expand window if empty</label>
+      <label id="fallbackLabel" class="disabled-control">
+        <span>Fallback Ending Within</span>
+        <select id="fallbackEndingWithinHours" disabled></select>
       </label>
       <label>
-        <span>Max Auction</span>
-        <input id="maxPrice" type="number" min="1" step="1" value="250" />
-      </label>
-      <label>
-        <span>Ending</span>
-        <input id="minutes" type="number" min="1" max="1440" step="1" value="360" />
-      </label>
-      <label>
-        <span>Fallback</span>
-        <input id="fallbackMinutes" type="number" min="1" max="1440" step="1" value="360" />
-      </label>
-      <label>
-        <span>Optional Min 1yr Volume</span>
-        <input id="minVolume" type="number" min="0" step="100" value="0" />
-      </label>
-      <label>
-        <span>Candidate Pool</span>
-        <input id="candidatePool" type="number" min="5" max="50" step="1" value="10" />
+        <span>Pages / Grade</span>
+        <input id="pagesPerGrade" type="number" min="1" max="10" step="1" value="1" />
       </label>
       <label>
         <span>Limit</span>
-        <input id="limit" type="number" min="1" max="25" step="1" value="10" />
+        <input id="take" type="number" min="1" max="250" step="1" value="100" />
+      </label>
+      <label>
+        <span>Min Market</span>
+        <input id="minMarketValue" type="number" min="0" step="1" value="50" />
+      </label>
+      <label>
+        <span>Max Market</span>
+        <input id="maxMarketValue" type="number" min="1" step="1" value="250" />
+      </label>
+      <label>
+        <span>Min Current Bid</span>
+        <input id="minCurrentBid" type="number" min="0" step="1" value="1" />
+      </label>
+      <label>
+        <span>Max Current Bid</span>
+        <input id="maxCurrentBid" type="number" min="1" step="1" value="250" />
+      </label>
+      <label>
+        <span>Min Profit</span>
+        <input id="minProfit" type="number" min="0" step="1" value="10" />
+      </label>
+      <label>
+        <span>Min Margin %</span>
+        <input id="minMarginPercent" type="number" min="0" step="1" value="10" />
+      </label>
+      <label>
+        <span>Min ROI %</span>
+        <input id="minRoiPercent" type="number" min="0" step="1" value="10" />
+      </label>
+      <label>
+        <span>Match Score</span>
+        <input id="minMatchScore" type="number" min="60" max="100" step="1" value="75" />
+      </label>
+      <label>
+        <span>Min 1yr Volume</span>
+        <input id="minProductYearlyVolume" type="number" min="0" step="1" value="0" />
+      </label>
+      <label>
+        <span>Fee %</span>
+        <input id="feePercent" type="number" min="0" step="0.01" value="13.25" />
+      </label>
+      <label>
+        <span>Fixed Fee</span>
+        <input id="fixedFee" type="number" min="0" step="0.01" value="0.30" />
+      </label>
+      <label>
+        <span>Outbound Ship</span>
+        <input id="outboundShippingCost" type="number" min="0" step="0.01" value="5.00" />
+      </label>
+      <label>
+        <span>Packing</span>
+        <input id="packingCost" type="number" min="0" step="0.01" value="1.00" />
+      </label>
+      <label>
+        <span>Buffer</span>
+        <input id="bufferCost" type="number" min="0" step="0.01" value="2.00" />
+      </label>
+      <label>
+        <span>Buy Now Limit</span>
+        <input id="buyNowComparisonLimit" type="number" min="1" max="50" step="1" value="10" />
+      </label>
+      <label>
+        <span>Sort</span>
+        <select id="sortBy">
+          <option value="ending">Ending soonest</option>
+          <option value="headroom">Greatest bid headroom</option>
+          <option value="profit">Highest profit at current bid</option>
+          <option value="roi">Highest ROI at current bid</option>
+          <option value="effective">Lowest current effective bid</option>
+          <option value="market">Highest market value</option>
+          <option value="bids">Highest bid count</option>
+          <option value="volume">Highest volume</option>
+          <option value="confidence">Highest match confidence</option>
+        </select>
+      </label>
+      <label class="checkbox-row inline-check"><input id="includeBuyNowComparison" type="checkbox" /> Include Buy Now comparison</label>
+      <label class="checkbox-row inline-check"><input id="showOnlyViableAuctions" type="checkbox" /> Viable only</label>
+      <label>
+        <span>Query Override</span>
+        <input id="query" type="text" placeholder="empty uses grade-specific eBay query" />
       </label>
       <button id="runScan" type="button" class="primary">Run Auction Scan</button>
+      <button id="resetDefaults" type="button">Reset Defaults</button>
     </section>
 
     <section class="metric-grid scan-metrics" id="scanMetrics"></section>
@@ -77,31 +160,35 @@
           <h2 id="resultTitle">No auction scan run yet</h2>
         </div>
       </div>
-      <div class="scan-table-wrap">
-        <table class="scan-table auction-table">
-          <thead>
-            <tr>
-              <th>Rank</th>
-              <th>Card</th>
-              <th>Ends</th>
-              <th>Market</th>
-              <th>1yr Vol</th>
-              <th>Auction Cost</th>
-              <th>Buy Now Low</th>
-              <th>Spread</th>
-              <th>Listing</th>
-            </tr>
-          </thead>
-          <tbody id="scanRows">
-            <tr><td colspan="9">Run the auction scan to load ending-soon opportunities.</td></tr>
-          </tbody>
-        </table>
+      <div id="appliedRequest" class="request-strip"></div>
+      <div id="auctionRows" class="auction-grid">
+        <div class="empty-state">Choose a window and run the auction scan. No provider request is made until you click Run.</div>
       </div>
+    </section>
+
+    <section class="diagnostic-grid">
+      <section class="panel">
+        <div class="panel-heading compact-heading">
+          <div>
+            <p class="eyebrow">Grade Runs</p>
+            <h2>Provider Coverage</h2>
+          </div>
+        </div>
+        <div id="gradeRuns" class="rows"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading compact-heading">
+          <div>
+            <p class="eyebrow">Rejected Rows</p>
+            <h2>Why Rows Dropped</h2>
+          </div>
+        </div>
+        <div id="rejectionSummary" class="rows"></div>
+      </section>
     </section>
   </main>
 
   <script src="/auctionscan.js" type="module"></script>
 </body>
 </html>
-
-

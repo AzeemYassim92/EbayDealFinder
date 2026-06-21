@@ -206,73 +206,7 @@ app.MapGet("/api/scan/pricecharting", async (HttpContext context) =>
         return Results.Ok(PriceChartingScanPayload.Blocked(category, grade, minPrice, maxPrice, limit, ex.Message));
     }
 });
-app.MapGet("/api/scan/auctions", async (HttpContext context) =>
-{
-    var token = ReadPriceChartingToken(builder.Configuration);
-    var zyteToken = ReadZyteToken(builder.Configuration);
-    var query = context.Request.Query;
-    var category = QueryText(query, "category", "pokemon-cards");
-    var grade = QueryText(query, "grade", "psa10");
-    var minPrice = QueryDecimal(query, "min", 1m);
-    var maxPrice = QueryDecimal(query, "max", 250m);
-    var limit = Math.Clamp(QueryInt(query, "limit", 10), 1, 25);
-    var candidatePool = Math.Clamp(QueryInt(query, "candidatePool", 10), 5, 50);
-    var minYearlyVolume = Math.Max(QueryInt(query, "minYearlyVolume", 0), 0);
-    var minutes = Math.Clamp(QueryInt(query, "minutes", 360), 1, 1440);
-    var fallbackMinutes = Math.Clamp(QueryInt(query, "fallbackMinutes", 360), minutes, 1440);
-
-    if (string.IsNullOrWhiteSpace(token))
-    {
-        return Results.Ok(AuctionScanPayload.Blocked("PriceCharting token is not configured.", minutes, fallbackMinutes, minPrice, maxPrice, minYearlyVolume));
-    }
-
-    if (string.IsNullOrWhiteSpace(zyteToken))
-    {
-        return Results.Ok(AuctionScanPayload.Blocked("Zyte key is not configured.", minutes, fallbackMinutes, minPrice, maxPrice, minYearlyVolume));
-    }
-
-    try
-    {
-        var pricePayload = await PriceChartingScanProvider.ScanAsync(
-            token,
-            category,
-            grade,
-            minPrice,
-            maxPrice,
-            Math.Min(candidatePool * 3, 300),
-            context.RequestAborted);
-
-        var candidates = pricePayload.Results
-            .Where(candidate => (candidate.SalesVolume ?? 0) >= minYearlyVolume && LooksEnglishPokemonCandidate(candidate))
-            .Take(candidatePool)
-            .Select((candidate, index) => candidate with { Rank = index + 1 })
-            .ToArray();
-
-        var candidatePayload = pricePayload with
-        {
-            Limit = candidatePool,
-            ReturnedCount = candidates.Length,
-            Results = candidates
-        };
-
-        var payload = await AuctionScanProvider.ScanAsync(
-            zyteToken,
-            candidatePayload,
-            minutes,
-            fallbackMinutes,
-            minPrice,
-            maxPrice,
-            minYearlyVolume,
-            limit,
-            context.RequestAborted);
-
-        return Results.Ok(payload);
-    }
-    catch (Exception ex)
-    {
-        return Results.Ok(AuctionScanPayload.Blocked(ex.Message, minutes, fallbackMinutes, minPrice, maxPrice, minYearlyVolume));
-    }
-});
+app.MapGradedAuctionScanEndpoints(builder.Configuration);
 app.MapGet("/api/probe/ebay", async (HttpContext context) =>
 {
     var zyteToken = ReadZyteToken(builder.Configuration);
@@ -537,16 +471,6 @@ static int QueryInt(IQueryCollection query, string key, int fallback)
     return int.TryParse(value, out var parsed) ? parsed : fallback;
 }
 
-static bool LooksEnglishPokemonCandidate(PriceChartingScanResult candidate)
-{
-    var value = $"{candidate.ProductName} {candidate.ConsoleName}";
-    var nonEnglishSignals = new[]
-    {
-        "Japanese", "Korean", "Chinese", "German", "French", "Spanish", "Italian", "Thai", "Indonesian", "Portuguese"
-    };
-
-    return !nonEnglishSignals.Any(signal => value.Contains(signal, StringComparison.OrdinalIgnoreCase));
-}
 app.Run();
 
 static int Score(ProductCard card, JustTcgCardDto candidate)
@@ -889,10 +813,3 @@ static class JsonRead
             }))
             .ToArray();
 }
-
-
-
-
-
-
-

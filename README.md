@@ -1,4 +1,4 @@
-﻿# P2W Deal Finder
+# P2W Deal Finder
 
 Local-first resale intelligence MVP for finding buy opportunities before rebuilding public marketplace features.
 
@@ -60,7 +60,27 @@ The first scan screen filters PriceCharting's Pokemon CSV export by grade and pr
 http://127.0.0.1:5178/auctionscan
 ```
 
-The auction scan is a separate short-horizon screen for English Pokemon PSA 10 auctions. It defaults to $1-$250, no minimum yearly volume gate, 10 candidates, 10 returned rows, and auctions ending within 6 hours.
+The auction scan is now a grade-aware short-horizon screen for correctly graded Pokemon auctions. It uses the same centralized grade definitions as the Graded Deal Scan, defaults to PSA 10 only, and supports the primary grade set: PSA 10, CGC 10 Pristine, BGS 10 Black Label, BGS 10, and TAG 10.
+
+Preferred API:
+
+```http
+POST /api/scan/graded-auctions
+```
+
+Debug/browser API:
+
+```text
+GET /api/scan/auctions?grades=psa10,bgs10&endingWithinHours=2&pagesPerGrade=1&take=50&minMarketValue=50&maxMarketValue=250&minCurrentBid=1&maxCurrentBid=250
+```
+
+`endingWithinHours` accepts 1 through 24 and defaults to 2. The old `minutes` and `fallbackMinutes` query parameters are deprecated and only kept as temporary GET compatibility shims. Window expansion is disabled by default; set `allowWindowExpansion=true` and `fallbackEndingWithinHours` explicitly when you want fallback behavior.
+
+Auction economics are labeled as current-bid estimates. The scanner separates PriceCharting market value bounds (`minMarketValue`, `maxMarketValue`) from auction acquisition bounds (`minCurrentBid`, `maxCurrentBid`). Current all-in acquisition cost is current bid plus inbound shipping. Maximum rational bid is the most restrictive ceiling from minimum profit, minimum margin, minimum ROI, and configured bid limits. DealFinder does not place bids.
+
+Auction eBay searches use category `183454` (CCG Individual Cards), condition `2750` (Graded), auction mode, and ending-soonest sorting. Provider request counts, estimated Zyte cost, cache use, rejection reasons, and per-grade diagnostics are visible in the response/UI. Shorter windows use fresher cache limits.
+
+See `docs/AUCTION_SCAN_PARAMETERS.md` for the plain-English control and result-field guide.
 ## Immediate Next Step
 
 Validate whether JustTCG quota resets for the one-card productdetails endpoint. If we choose PriceCharting, configure `PRICECHARTING_TOKEN`, verify Mega Lopunny ex #128 live fields, then persist provider snapshots separately from catalog records.
@@ -166,4 +186,3 @@ dotnet run --project src/P2W.DealFinder.Worker -- pokemon-catalog-import --csv d
 ```
 
 The configured eBay search scope uses category id `183454` and condition id `2750` for graded. The condition filter is known to be a condition filter; category scoping is applied at search level and should not be described as item-level category validation unless listing metadata confirms it.
-

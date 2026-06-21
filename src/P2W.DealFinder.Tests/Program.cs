@@ -1,4 +1,5 @@
-﻿using P2W.DealFinder.Application.DealScoring;
+using P2W.DealFinder.Api;
+using P2W.DealFinder.Application.DealScoring;
 using P2W.DealFinder.Application.Grading;
 
 var tests = new (string Name, Action Run)[]
@@ -6,6 +7,12 @@ var tests = new (string Name, Action Run)[]
     ("grade mappings", GradeMappings),
     ("positive title classification", PositiveTitleClassification),
     ("negative title classification", NegativeTitleClassification),
+    ("auction time windows", AuctionTimeWindows),
+    ("auction time parser", AuctionTimeParserCases),
+    ("auction request normalization", AuctionRequestNormalization),
+    ("auction search URL scope", AuctionSearchUrlScope),
+    ("auction economics", AuctionEconomics),
+    ("cache freshness", CacheFreshness),
     ("economics", Economics)
 };
 
@@ -62,6 +69,127 @@ static void NegativeTitleClassification()
     Rejected("Pokemon Charizard price tag 10 dollars", "tag10");
 }
 
+static void AuctionTimeWindows()
+{
+    var captured = new DateTimeOffset(2026, 6, 21, 12, 0, 0, TimeSpan.Zero);
+    True(AuctionTimeParser.IsInsideWindow(AuctionTimeParser.FromEndUtc(captured.AddMinutes(59), captured, AuctionTimeParseSource.StructuredEndDate), captured, 1), "59 minutes passes one-hour window");
+    True(AuctionTimeParser.IsInsideWindow(AuctionTimeParser.FromEndUtc(captured.AddMinutes(60), captured, AuctionTimeParseSource.StructuredEndDate), captured, 1), "60 minutes passes one-hour window");
+    False(AuctionTimeParser.IsInsideWindow(AuctionTimeParser.FromEndUtc(captured.AddMinutes(61), captured, AuctionTimeParseSource.StructuredEndDate), captured, 1), "61 minutes fails one-hour window");
+    True(AuctionTimeParser.IsInsideWindow(AuctionTimeParser.FromEndUtc(captured.AddMinutes(119), captured, AuctionTimeParseSource.StructuredEndDate), captured, 2), "119 minutes passes two-hour window");
+    True(AuctionTimeParser.IsInsideWindow(AuctionTimeParser.FromEndUtc(captured.AddMinutes(120), captured, AuctionTimeParseSource.StructuredEndDate), captured, 2), "120 minutes passes two-hour window");
+    False(AuctionTimeParser.IsInsideWindow(AuctionTimeParser.FromEndUtc(captured.AddMinutes(121), captured, AuctionTimeParseSource.StructuredEndDate), captured, 2), "121 minutes fails two-hour window");
+    True(AuctionTimeParser.IsInsideWindow(AuctionTimeParser.FromEndUtc(captured.AddMinutes(1440), captured, AuctionTimeParseSource.StructuredEndDate), captured, 24), "1440 minutes passes 24-hour window");
+    False(AuctionTimeParser.IsInsideWindow(AuctionTimeParser.FromEndUtc(captured.AddMinutes(1441), captured, AuctionTimeParseSource.StructuredEndDate), captured, 24), "more than 1440 minutes fails");
+    False(AuctionTimeParser.IsInsideWindow(AuctionTimeParser.FromEndUtc(captured, captured, AuctionTimeParseSource.StructuredEndDate), captured, 1), "zero remaining fails");
+    False(AuctionTimeParser.IsInsideWindow(AuctionTimeParser.FromEndUtc(captured.AddMinutes(-1), captured, AuctionTimeParseSource.StructuredEndDate), captured, 1), "negative remaining fails");
+    False(AuctionTimeParser.IsInsideWindow(AuctionTimeParser.Missing(), captured, 1), "unknown remaining fails");
+    Equal(AuctionTimeParseStatus.Ended, AuctionTimeParser.FromEndUtc(captured.AddMinutes(-1), captured, AuctionTimeParseSource.StructuredEndDate).Status, "expired auction status");
+}
+
+static void AuctionTimeParserCases()
+{
+    var captured = new DateTimeOffset(2026, 6, 21, 12, 0, 0, TimeSpan.Zero);
+    Equal(42m, AuctionTimeParser.FromRelativeText("42m left", captured).MinutesRemainingAtCapture, "42m left");
+    Equal(72m, AuctionTimeParser.FromRelativeText("1h 12m left", captured).MinutesRemainingAtCapture, "1h 12m left");
+    Equal(125m, AuctionTimeParser.FromRelativeText("2 hr 5 min", captured).MinutesRemainingAtCapture, "2 hr 5 min");
+    Equal(1439m, AuctionTimeParser.FromRelativeText("23h 59m", captured).MinutesRemainingAtCapture, "23h 59m");
+    Equal(1440m, AuctionTimeParser.FromRelativeText("1d", captured).MinutesRemainingAtCapture, "1d");
+    Equal(0.98m, AuctionTimeParser.FromRelativeText("59s", captured).MinutesRemainingAtCapture, "59s");
+    Equal(AuctionTimeParseStatus.Ended, AuctionTimeParser.FromRelativeText("Ended", captured).Status, "ended text");
+    Equal(AuctionTimeParseStatus.Missing, AuctionTimeParser.FromRelativeText(null, captured).Status, "missing value");
+    Equal(AuctionTimeParseStatus.Invalid, AuctionTimeParser.FromRelativeText("soon-ish", captured).Status, "malformed value");
+}
+
+static void AuctionRequestNormalization()
+{
+    var request = new GradedAuctionScanApiRequest
+    {
+        Grades = new[] { "psa10", "bgs10" },
+        EndingWithinHours = 1,
+        AllowWindowExpansion = false,
+        FallbackEndingWithinHours = 6
+    };
+    var normal = GradedAuctionScanApiRequestNormalizer.Normalize(request, expandWindow: true);
+    Equal(1, normal.AppliedEndingWithinHours, "one-hour request does not silently expand");
+    False(normal.WindowExpanded, "fallback disabled by default");
+
+    var expanded = GradedAuctionScanApiRequestNormalizer.Normalize(request with { AllowWindowExpansion = true }, expandWindow: true);
+    Equal(6, expanded.AppliedEndingWithinHours, "explicit fallback expands");
+    True(expanded.WindowExpanded, "window expanded flag");
+
+    Equal(1, GradedAuctionScanApiRequestNormalizer.Normalize(new GradedAuctionScanApiRequest { EndingWithinHours = -10 }).AppliedEndingWithinHours, "hours below one clamps to one");
+    Equal(24, GradedAuctionScanApiRequestNormalizer.Normalize(new GradedAuctionScanApiRequest { EndingWithinHours = 99 }).AppliedEndingWithinHours, "hours above 24 clamps to 24");
+    Equal(2, GradedAuctionScanApiRequestNormalizer.Normalize(new GradedAuctionScanApiRequest { Grades = new[] { "psa10", "bgs10" } }).Grades.Length, "comma-grade equivalent resolution target");
+    Throws<ArgumentException>(() => GradedAuctionScanApiRequestNormalizer.Normalize(new GradedAuctionScanApiRequest { Grades = new[] { "mystery-grade" } }), "unknown grade validation");
+}
+
+static void AuctionSearchUrlScope()
+{
+    var request = GradedAuctionScanApiRequestNormalizer.Normalize(new GradedAuctionScanApiRequest
+    {
+        Grades = new[] { "psa10" },
+        EndingWithinHours = 2,
+        MinCurrentBid = 10m,
+        MaxCurrentBid = 250m
+    });
+    var psaUrl = GradedAuctionScanProvider.BuildAuctionSearchUrlForTesting(GradeDefinitions.GetRequired("psa10"), request, 1);
+    Contains("_sacat=183454", psaUrl, "category 183454");
+    Contains("LH_ItemCondition=2750", psaUrl, "graded condition 2750");
+    Contains("LH_Auction=1", psaUrl, "auction mode");
+    Contains("_sop=1", psaUrl, "ending soonest sort");
+    Contains("_pgn=1", psaUrl, "page number");
+    Contains("_udlo=10", psaUrl, "min current bid range");
+    Contains("_udhi=250", psaUrl, "max current bid range");
+    DoesNotContain("_sacat=0", psaUrl, "no global category");
+
+    var bgsUrl = GradedAuctionScanProvider.BuildAuctionSearchUrlForTesting(GradeDefinitions.GetRequired("bgs10"), request, 1);
+    True(!string.Equals(psaUrl, bgsUrl, StringComparison.OrdinalIgnoreCase), "one independent query is built per selected grade");
+}
+
+static void AuctionEconomics()
+{
+    var result = AuctionBidCeilingCalculator.Calculate(new AuctionBidEconomicsInput(
+        ExpectedMarketValue: 100m,
+        CurrentBid: 50m,
+        InboundShippingPrice: 5m,
+        FeePercent: 13.25m,
+        FixedFee: 0.30m,
+        OutboundShippingCost: 5m,
+        PackingCost: 1m,
+        BufferCost: 2m,
+        MinProfit: 10m,
+        MinMarginPercent: 10m,
+        MinRoiPercent: 20m,
+        MaxCurrentBid: 80m));
+
+    Equal(0.1325m, result.FeePercentDecimal, "fee decimal conversion exactly once");
+    Equal(55m, result.CurrentEffectiveBuyPrice, "current bid plus inbound shipping");
+    Equal(13.55m, result.EstimatedSaleFees, "sale fees");
+    Equal(21.55m, result.OtherDispositionCosts, "all disposition costs");
+    Equal(76.55m, result.EstimatedTotalCostAtCurrentBid, "total cost at current bid");
+    Equal(23.45m, result.NetProfitAtCurrentBid, "profit at current bid");
+    Equal(23.45m, result.NetMarginPercentAtCurrentBid, "margin at current bid");
+    Equal(42.64m, result.RoiPercentAtCurrentBid, "ROI at current bid");
+    Equal(68.45m, result.MaxEffectiveBuyByProfit, "profit ceiling");
+    Equal(68.45m, result.MaxEffectiveBuyByMargin, "margin ceiling");
+    Equal(65.38m, result.MaxEffectiveBuyByRoi, "ROI ceiling");
+    Equal(65.38m, result.MaximumRationalEffectiveBuy, "most restrictive ceiling");
+    Equal(60.38m, result.MaximumRationalItemBid, "shipping subtracted from max item bid");
+    Equal(10.38m, result.BidHeadroom, "bid headroom");
+
+    var negative = AuctionBidCeilingCalculator.Calculate(new AuctionBidEconomicsInput(100m, 75m, 5m, 13.25m, 0.30m, 5m, 1m, 2m, 10m, 10m, 20m, 80m));
+    True(negative.BidHeadroom < 0, "negative headroom fails viability upstream");
+}
+
+static void CacheFreshness()
+{
+    Equal(TimeSpan.FromSeconds(60), GradedAuctionScanProvider.CacheDurationForTesting(1), "one-hour cache freshness");
+    Equal(TimeSpan.FromSeconds(60), GradedAuctionScanProvider.CacheDurationForTesting(2), "two-hour cache freshness");
+    Equal(TimeSpan.FromMinutes(2), GradedAuctionScanProvider.CacheDurationForTesting(6), "six-hour cache freshness");
+    Equal(TimeSpan.FromMinutes(3), GradedAuctionScanProvider.CacheDurationForTesting(12), "twelve-hour cache freshness");
+    Equal(TimeSpan.FromMinutes(5), GradedAuctionScanProvider.CacheDurationForTesting(24), "twenty-four-hour cache freshness");
+}
+
 static void Economics()
 {
     var result = GradedDealEconomicsCalculator.Calculate(new DealEconomicsInput(
@@ -113,4 +241,33 @@ static void Null(object? actual, string label)
 static void True(bool value, string label)
 {
     if (!value) throw new InvalidOperationException(label);
+}
+
+static void False(bool value, string label)
+{
+    if (value) throw new InvalidOperationException(label);
+}
+
+static void Contains(string expected, string actual, string label)
+{
+    if (!actual.Contains(expected, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException($"{label}: expected '{expected}' in '{actual}'");
+}
+
+static void DoesNotContain(string expected, string actual, string label)
+{
+    if (actual.Contains(expected, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException($"{label}: did not expect '{expected}' in '{actual}'");
+}
+
+static void Throws<TException>(Action action, string label) where TException : Exception
+{
+    try
+    {
+        action();
+    }
+    catch (TException)
+    {
+        return;
+    }
+
+    throw new InvalidOperationException($"{label}: expected {typeof(TException).Name}");
 }
